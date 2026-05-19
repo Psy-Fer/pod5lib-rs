@@ -36,4 +36,7 @@ pub enum Error {
 
     #[error("signal row index {0} out of range (table has {1} rows)")]
     SignalRowOutOfRange(u64, usize),
+
+    #[error("file_identifier mismatch: {0} table schema has '{1}', footer has '{2}'")]
+    FileIdentifierMismatch(String, String, String),
 }
