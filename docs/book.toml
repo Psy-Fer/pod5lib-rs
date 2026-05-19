@@ -1,0 +1,9 @@
+[book]
+title = "pod5"
+authors = ["Psy-Fer"]
+description = "Pure Rust library for reading and writing POD5 nanopore sequencing files"
+src = "src"
+language = "en"
+
+[output.html]
+git-repository-url = "https://github.com/Psy-Fer/pod5-rs"
