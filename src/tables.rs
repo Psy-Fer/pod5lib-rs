@@ -310,7 +310,7 @@ pub fn parse_reads_batches(
             let run_info = run_info_by_id
                 .get(acq_id)
                 .cloned()
-                .unwrap_or_else(|| run_infos.last().cloned().unwrap());
+                .ok_or_else(|| Error::MissingRunInfo(acq_id.to_string()))?;
 
             // scaling pairs
             let tracked_scaling = match (tr_scale_col, tr_shift_col) {

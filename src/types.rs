@@ -197,7 +197,7 @@ impl RunInfo {
 /// Matches the Python `pod5.ReadRecord` public API field for field.
 #[derive(Debug, Clone)]
 pub struct ReadRecord {
-    /// 16-byte UUID in POD5 `bytes_le` layout. Use [`uuid_to_str`] to display.
+    /// 16-byte UUID in standard RFC 4122 big-endian byte order. Use [`uuid_to_str`] to display.
     pub read_id: [u8; 16],
     pub read_number: u32,
     pub pore: Pore,
