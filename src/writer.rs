@@ -123,6 +123,10 @@ struct WriterRead {
 }
 
 impl Writer {
+    /// Create a new empty writer.
+    ///
+    /// `software` and `pod5_version` are pre-filled from `Cargo.toml`;
+    /// set `file_identifier` before calling [`Writer::write_file`].
     pub fn new() -> Self {
         Self {
             file_identifier: String::new(),
@@ -160,10 +164,10 @@ impl Writer {
 // ── StreamingWriter ───────────────────────────────────────────────────────────
 
 /// Memory-efficient POD5 writer that VBZ-compresses each read's signal
-/// immediately on [`write_read`], rather than accumulating raw `i16` samples.
+/// immediately on [`Self::write_read`], rather than accumulating raw `i16` samples.
 ///
 /// The decompressed signal slice is not retained after each call to
-/// [`write_read`], making this suitable for writing large files without holding
+/// [`Self::write_read`], making this suitable for writing large files without holding
 /// all signal data in memory at once.
 ///
 /// ```no_run

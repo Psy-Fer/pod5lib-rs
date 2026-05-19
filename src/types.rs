@@ -55,7 +55,9 @@ pub struct Pore {
 /// matching the Python pod5 library formula `(signal + calibration.offset) * calibration.scale`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calibration {
+    /// ADC zero-point offset added before scaling; typically negative.
     pub offset: f32,
+    /// Volts-per-ADC-count scale factor (`adc_range / digitisation`).
     pub scale: f32,
 }
 
@@ -81,20 +83,32 @@ impl Calibration {
 /// Why a read was terminated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReasonKind {
+    /// Reason not known or not recorded.
     Unknown,
+    /// Multiplexer (mux) was switched to a different channel.
     MuxChange,
+    /// Mux change triggered by an unblock command.
     UnblockMuxChange,
+    /// Mux change triggered by the data-service unblock path.
     DataServiceUnblockMuxChange,
+    /// Read ended because signal went positive (above threshold).
     SignalPositive,
+    /// Read ended because signal went negative (below threshold).
     SignalNegative,
+    /// Read terminated on explicit API request (e.g. `stop_receiving`).
     ApiRequest,
+    /// Read terminated due to a device data error.
     DeviceDataError,
+    /// Read terminated because the analysis configuration changed.
     AnalysisConfigChange,
+    /// Sequencing was paused.
     Paused,
+    /// Unrecognised end-reason string; the raw discriminant is preserved.
     Other(u8),
 }
 
 impl EndReasonKind {
+    /// Parse the lowercase snake_case reason string stored in the POD5 dictionary column.
     pub fn from_reason_str(s: &str) -> Self {
         match s {
             "unknown" => Self::Unknown,
@@ -111,6 +125,7 @@ impl EndReasonKind {
         }
     }
 
+    /// Return the canonical snake_case string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
@@ -128,8 +143,10 @@ impl EndReasonKind {
     }
 }
 
+/// How and why a read ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndReason {
+    /// Categorised termination reason.
     pub reason: EndReasonKind,
     /// Whether the read termination was externally forced (e.g. unblock).
     pub forced: bool,
@@ -140,16 +157,20 @@ pub struct EndReason {
 /// Optional (shift, scale) pair; `f32::NAN` when unavailable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShiftScalePair {
+    /// Shift component; `f32::NAN` if this pair was not recorded.
     pub shift: f32,
+    /// Scale component; `f32::NAN` if this pair was not recorded.
     pub scale: f32,
 }
 
 impl ShiftScalePair {
+    /// Sentinel value used when tracking or predicted scaling is absent.
     pub const UNAVAILABLE: Self = Self {
         shift: f32::NAN,
         scale: f32::NAN,
     };
 
+    /// Returns `true` if both components are finite (i.e. the pair was recorded).
     pub fn is_available(&self) -> bool {
         self.shift.is_finite() && self.scale.is_finite()
     }
@@ -160,26 +181,45 @@ impl ShiftScalePair {
 /// Per-experiment run context (one entry per MinKNOW acquisition).
 #[derive(Debug, Clone)]
 pub struct RunInfo {
+    /// Unique identifier for the MinKNOW acquisition (hex UUID string).
     pub acquisition_id: String,
-    /// Milliseconds since UNIX epoch (UTC).
+    /// Milliseconds since UNIX epoch (UTC) when the acquisition started.
     pub acquisition_start_time_ms: i64,
+    /// Maximum ADC output value for this device.
     pub adc_max: i16,
+    /// Minimum ADC output value for this device.
     pub adc_min: i16,
+    /// Arbitrary key/value context tags set by the experiment configuration.
     pub context_tags: HashMap<String, String>,
+    /// User-supplied experiment name.
     pub experiment_name: String,
+    /// Flow cell serial identifier.
     pub flow_cell_id: String,
+    /// Flow cell product code (e.g. `"FLO-MIN114"`).
     pub flow_cell_product_code: String,
+    /// MinKNOW sequencing protocol name.
     pub protocol_name: String,
+    /// Unique identifier for the protocol run.
     pub protocol_run_id: String,
+    /// Milliseconds since UNIX epoch (UTC) when the protocol started.
     pub protocol_start_time_ms: i64,
+    /// User-supplied sample identifier.
     pub sample_id: String,
+    /// ADC sampling rate in Hz.
     pub sample_rate: u16,
+    /// Sequencing kit product code (e.g. `"SQK-LSK114"`).
     pub sequencing_kit: String,
+    /// Physical sequencer position label (e.g. `"MN12345"`).
     pub sequencer_position: String,
+    /// Sequencer position type string (e.g. `"MinION Mk1C"`).
     pub sequencer_position_type: String,
+    /// Software version string recorded at acquisition time.
     pub software: String,
+    /// Host system name.
     pub system_name: String,
+    /// Host system type string.
     pub system_type: String,
+    /// Arbitrary key/value tracking ID tags set by MinKNOW.
     pub tracking_id: HashMap<String, String>,
 }
 
@@ -199,10 +239,15 @@ impl RunInfo {
 pub struct ReadRecord {
     /// 16-byte UUID in standard RFC 4122 big-endian byte order. Use [`uuid_to_str`] to display.
     pub read_id: [u8; 16],
+    /// Sequential read counter within the acquisition (1-indexed).
     pub read_number: u32,
+    /// Physical pore location where this read was acquired.
     pub pore: Pore,
+    /// ADC calibration parameters for converting signal to picoamps.
     pub calibration: Calibration,
+    /// How and why this read was terminated.
     pub end_reason: EndReason,
+    /// Run-level metadata for the acquisition this read belongs to.
     pub run_info: Arc<RunInfo>,
     /// Level immediately before the read (pA).
     pub median_before: f32,
@@ -210,9 +255,13 @@ pub struct ReadRecord {
     pub num_samples: u64,
     /// Absolute sample index in the acquisition where this read began.
     pub start_sample: u64,
+    /// Real-time tracked scaling from the signal processing pipeline; [`ShiftScalePair::UNAVAILABLE`] if not recorded.
     pub tracked_scaling: ShiftScalePair,
+    /// Predicted scaling from the signal processing pipeline; [`ShiftScalePair::UNAVAILABLE`] if not recorded.
     pub predicted_scaling: ShiftScalePair,
+    /// Number of MinKNOW event detections within this read.
     pub num_minknow_events: u64,
+    /// Number of reads that have occurred on this channel since the last mux change.
     pub num_reads_since_mux_change: u32,
     /// Seconds since the last mux change.
     pub time_since_mux_change: f32,

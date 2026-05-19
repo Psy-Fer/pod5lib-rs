@@ -211,6 +211,7 @@ impl Reader {
         self.reads.len()
     }
 
+    /// Returns `true` if the file contains no reads.
     pub fn is_empty(&self) -> bool {
         self.reads.is_empty()
     }
