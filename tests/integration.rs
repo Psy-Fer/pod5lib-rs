@@ -21,21 +21,27 @@ fn sample_pod5() -> Option<PathBuf> {
 
 #[test]
 fn uuid_to_str_known_value() {
-    // Python: uuid.UUID(bytes_le=bytes([1,2,3,4, 5,6, 7,8, 9,10, 11,12,13,14,15,16])).hex
-    // Expected: "04030201-0605-0807-090a-0b0c0d0e0f10"
+    // Python: str(uuid.UUID(bytes=bytes([1,2,3,4, 5,6, 7,8, 9,10, 11,12,13,14,15,16])))
+    // == "01020304-0506-0708-090a-0b0c0d0e0f10"
     let bytes: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let s = pod5::uuid_to_str(&bytes);
-    assert_eq!(s, "04030201-0605-0807-090a-0b0c0d0e0f10");
+    assert_eq!(s, "01020304-0506-0708-090a-0b0c0d0e0f10");
 }
 
 #[test]
 fn calibration_to_pa() {
+    // Formula: pA = (adc + offset) * scale
+    // offset is stored negative (e.g. -224 means subtract 224 from ADC).
     let cal = pod5::Calibration {
-        offset: 0.0,
+        offset: -224.0,
         scale: 0.1,
     };
-    let pa = cal.to_pa(&[0i16, 10, -10, 100]);
+    let pa = cal.to_pa(&[224i16, 234, 214]);
+    // (224 + -224) * 0.1 = 0.0
+    assert!((pa[0] - 0.0f32).abs() < 1e-5);
+    // (234 + -224) * 0.1 = 1.0
     assert!((pa[1] - 1.0f32).abs() < 1e-5);
+    // (214 + -224) * 0.1 = -1.0
     assert!((pa[2] - (-1.0f32)).abs() < 1e-5);
 }
 

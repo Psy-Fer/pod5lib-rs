@@ -6,20 +6,30 @@ use crate::signal::SignalTable;
 
 // ── UUID helpers ──────────────────────────────────────────────────────────────
 
-/// Format 16 raw bytes stored in POD5 `bytes_le` (mixed-endian Windows GUID) layout
-/// into the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` string.
+/// Format 16 raw bytes into the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID string.
+///
+/// POD5 stores read IDs as `FixedSizeBinary(16)` in standard RFC 4122 big-endian byte order,
+/// matching `uuid.UUID(bytes=data)` in Python.
 pub fn uuid_to_str(b: &[u8; 16]) -> String {
-    let g1 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-    let g2 = u16::from_le_bytes([b[4], b[5]]);
-    let g3 = u16::from_le_bytes([b[6], b[7]]);
-    let g4 = u16::from_be_bytes([b[8], b[9]]);
-    let g5 = (b[10] as u64) << 40
-        | (b[11] as u64) << 32
-        | (b[12] as u64) << 24
-        | (b[13] as u64) << 16
-        | (b[14] as u64) << 8
-        | b[15] as u64;
-    format!("{g1:08x}-{g2:04x}-{g3:04x}-{g4:04x}-{g5:012x}")
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15],
+    )
 }
 
 // ── Pore ──────────────────────────────────────────────────────────────────────
@@ -39,7 +49,10 @@ pub struct Pore {
 
 /// ADC → picoamp calibration parameters.
 ///
-/// `pA = (adc - offset) * scale`
+/// `pA = (adc + offset) * scale`
+///
+/// The stored `offset` is typically negative (the negated ADC zero-point),
+/// matching the Python pod5 library formula `(signal + calibration.offset) * calibration.scale`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calibration {
     pub offset: f32,
@@ -58,7 +71,7 @@ impl Calibration {
     /// Convert a slice of raw ADC values to picoamps.
     pub fn to_pa(&self, adc: &[i16]) -> Vec<f32> {
         adc.iter()
-            .map(|&s| (s as f32 - self.offset) * self.scale)
+            .map(|&s| (s as f32 + self.offset) * self.scale)
             .collect()
     }
 }

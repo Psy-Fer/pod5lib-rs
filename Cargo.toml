@@ -16,3 +16,8 @@ arrow = { version = "53", default-features = false, features = ["ipc"] }
 zstd = { version = "0.13", default-features = false }
 # Error derivation
 thiserror = "2"
+
+[dev-dependencies]
+# Used only by examples/dump_pod5.rs for the Python parity test.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
