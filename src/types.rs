@@ -216,3 +216,106 @@ impl ReadRecord {
         Ok(self.calibration.to_pa(&adc))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn dummy_run_info(adc_min: i16, adc_max: i16) -> RunInfo {
+        RunInfo {
+            acquisition_id: String::new(),
+            acquisition_start_time_ms: 0,
+            adc_max,
+            adc_min,
+            context_tags: HashMap::new(),
+            experiment_name: String::new(),
+            flow_cell_id: String::new(),
+            flow_cell_product_code: String::new(),
+            protocol_name: String::new(),
+            protocol_run_id: String::new(),
+            protocol_start_time_ms: 0,
+            sample_id: String::new(),
+            sample_rate: 4000,
+            sequencing_kit: String::new(),
+            sequencer_position: String::new(),
+            sequencer_position_type: String::new(),
+            software: String::new(),
+            system_name: String::new(),
+            system_type: String::new(),
+            tracking_id: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn calibration_from_range() {
+        let cal = Calibration::from_range(-5.0, 2000.0, 2048.0);
+        assert!((cal.offset - (-5.0)).abs() < 1e-6);
+        assert!((cal.scale - 2000.0_f32 / 2048.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn end_reason_round_trip() {
+        let pairs = [
+            ("unknown", EndReasonKind::Unknown),
+            ("mux_change", EndReasonKind::MuxChange),
+            ("unblock_mux_change", EndReasonKind::UnblockMuxChange),
+            (
+                "data_service_unblock_mux_change",
+                EndReasonKind::DataServiceUnblockMuxChange,
+            ),
+            ("signal_positive", EndReasonKind::SignalPositive),
+            ("signal_negative", EndReasonKind::SignalNegative),
+        ];
+        for (s, expected) in pairs {
+            let k = EndReasonKind::from_reason_str(s);
+            assert_eq!(k, expected);
+            assert_eq!(k.as_str(), s);
+        }
+    }
+
+    #[test]
+    fn end_reason_unknown_variant() {
+        let k = EndReasonKind::from_reason_str("something_new");
+        assert!(matches!(k, EndReasonKind::Other(_)));
+        assert_eq!(k.as_str(), "other");
+    }
+
+    #[test]
+    fn shift_scale_availability() {
+        assert!(
+            ShiftScalePair {
+                shift: 1.0,
+                scale: 2.0
+            }
+            .is_available()
+        );
+        assert!(!ShiftScalePair::UNAVAILABLE.is_available());
+        assert!(
+            !ShiftScalePair {
+                shift: f32::NAN,
+                scale: 1.0
+            }
+            .is_available()
+        );
+        assert!(
+            !ShiftScalePair {
+                shift: 1.0,
+                scale: f32::NAN
+            }
+            .is_available()
+        );
+    }
+
+    #[test]
+    fn run_info_digitisation() {
+        let ri = dummy_run_info(-2048, 2047);
+        assert!((ri.digitisation() - 4096.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn run_info_digitisation_symmetric() {
+        let ri = dummy_run_info(0, 511);
+        assert!((ri.digitisation() - 512.0).abs() < 1e-6);
+    }
+}

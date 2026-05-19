@@ -19,3 +19,25 @@ pub const FOOTER_LEN_FIELD_FROM_END: u64 = 32;
 pub fn align8(n: u64) -> u64 {
     (n + 7) & !7
 }
+
+#[cfg(test)]
+mod tests {
+    use super::align8;
+
+    #[test]
+    fn align8_already_aligned() {
+        assert_eq!(align8(0), 0);
+        assert_eq!(align8(8), 8);
+        assert_eq!(align8(16), 16);
+        assert_eq!(align8(1024), 1024);
+    }
+
+    #[test]
+    fn align8_rounds_up() {
+        assert_eq!(align8(1), 8);
+        assert_eq!(align8(7), 8);
+        assert_eq!(align8(9), 16);
+        assert_eq!(align8(15), 16);
+        assert_eq!(align8(17), 24);
+    }
+}

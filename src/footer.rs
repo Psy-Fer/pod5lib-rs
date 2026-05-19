@@ -198,3 +198,89 @@ pub fn parse(data: &[u8]) -> Result<Footer> {
         contents,
     })
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal valid FlatBuffer for a Footer with three string fields
+    /// and no contents vector.
+    ///
+    /// Buffer layout:
+    ///   [0..4]   root_uoffset = 4 (root table at pos 4)
+    ///   [4..8]   soffset (i32) = 4 - 20 = -16 → vtable at pos 20
+    ///   [8..12]  uoffset → file_id string   (field 0)
+    ///   [12..16] uoffset → software string  (field 1)
+    ///   [16..20] uoffset → version string   (field 2)
+    ///   [20..32] vtable: vt_size=12, obj_size=16, offsets=[4,8,12,0]
+    ///   [32..]   string data (u32 length prefix, then bytes, no null)
+    fn build_footer_fb(file_id: &str, software: &str, version: &str) -> Vec<u8> {
+        const TABLE_POS: usize = 4;
+        const VTABLE_POS: usize = 20;
+        const STRING_START: usize = 32;
+
+        let file_id_pos = STRING_START;
+        let software_pos = file_id_pos + 4 + file_id.len();
+        let version_pos = software_pos + 4 + software.len();
+
+        let mut buf = Vec::new();
+
+        // root_uoffset
+        buf.extend_from_slice(&(TABLE_POS as u32).to_le_bytes());
+        // soffset: table_pos - vtable_pos = 4 - 20 = -16
+        buf.extend_from_slice(&(TABLE_POS as i32 - VTABLE_POS as i32).to_le_bytes());
+        // uoffset for field 0 (stored at pos 8)
+        buf.extend_from_slice(&((file_id_pos - 8) as u32).to_le_bytes());
+        // uoffset for field 1 (stored at pos 12)
+        buf.extend_from_slice(&((software_pos - 12) as u32).to_le_bytes());
+        // uoffset for field 2 (stored at pos 16)
+        buf.extend_from_slice(&((version_pos - 16) as u32).to_le_bytes());
+        // buf is now 20 bytes
+
+        // vtable (12 bytes) at pos 20
+        buf.extend_from_slice(&12u16.to_le_bytes()); // vt_size
+        buf.extend_from_slice(&16u16.to_le_bytes()); // obj_size (pos 4..20 = 16 bytes)
+        buf.extend_from_slice(&4u16.to_le_bytes()); // field 0 offset from table: 8-4=4
+        buf.extend_from_slice(&8u16.to_le_bytes()); // field 1: 12-4=8
+        buf.extend_from_slice(&12u16.to_le_bytes()); // field 2: 16-4=12
+        buf.extend_from_slice(&0u16.to_le_bytes()); // field 3 absent
+        // buf is now 32 bytes
+
+        // strings
+        buf.extend_from_slice(&(file_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(file_id.as_bytes());
+        buf.extend_from_slice(&(software.len() as u32).to_le_bytes());
+        buf.extend_from_slice(software.as_bytes());
+        buf.extend_from_slice(&(version.len() as u32).to_le_bytes());
+        buf.extend_from_slice(version.as_bytes());
+
+        buf
+    }
+
+    #[test]
+    fn parse_too_short() {
+        let err = parse(&[1, 2, 3]).unwrap_err();
+        assert!(matches!(err, crate::Error::FlatBuffers(_)));
+    }
+
+    #[test]
+    fn parse_minimal_footer() {
+        let fb = build_footer_fb("my-uuid", "test-software", "1.2.3");
+        let footer = parse(&fb).expect("parse failed");
+        assert_eq!(footer.file_identifier, "my-uuid");
+        assert_eq!(footer.software, "test-software");
+        assert_eq!(footer.pod5_version, "1.2.3");
+        assert!(footer.contents.is_empty());
+    }
+
+    #[test]
+    fn content_type_mapping() {
+        assert_eq!(ContentType::from_i16(0), ContentType::ReadsTable);
+        assert_eq!(ContentType::from_i16(1), ContentType::SignalTable);
+        assert_eq!(ContentType::from_i16(4), ContentType::RunInfoTable);
+        assert_eq!(ContentType::from_i16(99), ContentType::Other(99));
+        assert_eq!(ContentType::from_i16(-1), ContentType::Other(-1));
+    }
+}

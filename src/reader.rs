@@ -27,6 +27,7 @@ use crate::{Error, Result};
 ///     println!("{} samples", read.num_samples);
 /// }
 /// ```
+#[derive(Debug)]
 pub struct Reader {
     reads: Vec<ReadRecord>,
     run_infos: Vec<Arc<RunInfo>>,

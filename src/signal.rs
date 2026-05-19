@@ -191,4 +191,57 @@ mod tests {
         let out = decode_svb16(&data, 2).unwrap();
         assert_eq!(out, vec![5u16, 300u16]);
     }
+
+    #[test]
+    fn decompress_vbz_zero_samples() {
+        let result = decompress_vbz(&[], 0).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decompress_vbz_bad_input() {
+        let result = decompress_vbz(b"not-a-zstd-frame", 1);
+        assert!(matches!(result, Err(crate::Error::Vbz(_))));
+    }
+
+    #[test]
+    fn signal_table_row_out_of_range() {
+        let table = SignalTable { rows: vec![] };
+        let err = table.samples_for_rows(&[0]).unwrap_err();
+        assert!(matches!(err, crate::Error::SignalRowOutOfRange(0, 0)));
+    }
+
+    #[test]
+    fn signal_table_uncompressed_path() {
+        let table = SignalTable {
+            rows: vec![SignalRow {
+                data: vec![1u8, 0, 5u8, 0], // i16 LE: [1, 5]
+                num_samples: 2,
+                compressed: false,
+            }],
+        };
+        let result = table.samples_for_rows(&[0]).unwrap();
+        assert_eq!(result, vec![1i16, 5i16]);
+    }
+
+    #[test]
+    fn signal_table_multi_row_concat() {
+        let table = SignalTable {
+            rows: vec![
+                SignalRow {
+                    data: vec![1u8, 0, 2u8, 0],
+                    num_samples: 2,
+                    compressed: false,
+                },
+                SignalRow {
+                    data: vec![3u8, 0],
+                    num_samples: 1,
+                    compressed: false,
+                },
+            ],
+        };
+        // indices [1, 0] → row 1 then row 0
+        let result = table.samples_for_rows(&[1, 0]).unwrap();
+        assert_eq!(result, vec![3i16, 1i16, 2i16]);
+    }
 }
