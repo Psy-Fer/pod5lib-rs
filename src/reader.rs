@@ -128,12 +128,29 @@ impl Reader {
 
         // ── 6. Load each Arrow IPC section ────────────────────────────────
         let run_info_batches = tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
-        let run_infos = tables::parse_run_info_batches(&run_info_batches)?;
-
         let signal_batches = tables::read_ipc_section(reader, signal_off, signal_len)?;
-        let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
-
         let reads_batches = tables::read_ipc_section(reader, reads_off, reads_len)?;
+
+        // Cross-validate MINKNOW:file_identifier between footer and each table schema.
+        for (table_name, batches) in [
+            ("RunInfo", &run_info_batches),
+            ("Signal", &signal_batches),
+            ("Reads", &reads_batches),
+        ] {
+            if let Some(batch) = batches.first()
+                && let Some(schema_id) = batch.schema().metadata().get("MINKNOW:file_identifier")
+                && schema_id != &footer.file_identifier
+            {
+                return Err(Error::FileIdentifierMismatch(
+                    table_name.to_string(),
+                    schema_id.clone(),
+                    footer.file_identifier.clone(),
+                ));
+            }
+        }
+
+        let run_infos = tables::parse_run_info_batches(&run_info_batches)?;
+        let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
         let reads = tables::parse_reads_batches(&reads_batches, &run_infos, signal_table)?;
 
         let reads_index: HashMap<[u8; 16], usize> = reads
