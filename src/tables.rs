@@ -231,8 +231,13 @@ pub fn parse_reads_batches(
         let start_col = col!(batch, "start", UInt64Array)?;
         let end_reason_forced_col = col!(batch, "end_reason_forced", BooleanArray)?;
         let num_events_col = col!(batch, "num_minknow_events", UInt64Array)?;
-        let num_reads_mux_col = col!(batch, "num_reads_since_mux_change", UInt32Array)?;
-        let time_mux_col = col!(batch, "time_since_mux_change", Float32Array)?;
+        // Deprecated in newer MinKNOW versions; may be absent in older files.
+        let num_reads_mux_col = batch
+            .column_by_name("num_reads_since_mux_change")
+            .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
+        let time_mux_col = batch
+            .column_by_name("time_since_mux_change")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
         // Optional v4 column
         let open_pore_col = batch
@@ -336,8 +341,8 @@ pub fn parse_reads_batches(
                 tracked_scaling,
                 predicted_scaling,
                 num_minknow_events: num_events_col.value(i),
-                num_reads_since_mux_change: num_reads_mux_col.value(i),
-                time_since_mux_change: time_mux_col.value(i),
+                num_reads_since_mux_change: num_reads_mux_col.map_or(0, |c| c.value(i)),
+                time_since_mux_change: time_mux_col.map_or(0.0, |c| c.value(i)),
                 open_pore_level: open_pore_col.map_or(f32::NAN, |c| if c.is_null(i) { f32::NAN } else { c.value(i) }),
                 signal_row_indices,
                 signal_table: Arc::clone(&signal_table),
