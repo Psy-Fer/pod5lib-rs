@@ -87,6 +87,10 @@ pub enum EndReasonKind {
     DataServiceUnblockMuxChange,
     SignalPositive,
     SignalNegative,
+    ApiRequest,
+    DeviceDataError,
+    AnalysisConfigChange,
+    Paused,
     Other(u8),
 }
 
@@ -99,6 +103,10 @@ impl EndReasonKind {
             "data_service_unblock_mux_change" => Self::DataServiceUnblockMuxChange,
             "signal_positive" => Self::SignalPositive,
             "signal_negative" => Self::SignalNegative,
+            "api_request" => Self::ApiRequest,
+            "device_data_error" => Self::DeviceDataError,
+            "analysis_config_change" => Self::AnalysisConfigChange,
+            "paused" => Self::Paused,
             _ => Self::Other(0),
         }
     }
@@ -111,6 +119,10 @@ impl EndReasonKind {
             Self::DataServiceUnblockMuxChange => "data_service_unblock_mux_change",
             Self::SignalPositive => "signal_positive",
             Self::SignalNegative => "signal_negative",
+            Self::ApiRequest => "api_request",
+            Self::DeviceDataError => "device_data_error",
+            Self::AnalysisConfigChange => "analysis_config_change",
+            Self::Paused => "paused",
             Self::Other(_) => "other",
         }
     }
@@ -279,6 +291,10 @@ mod tests {
             ),
             ("signal_positive", EndReasonKind::SignalPositive),
             ("signal_negative", EndReasonKind::SignalNegative),
+            ("api_request", EndReasonKind::ApiRequest),
+            ("device_data_error", EndReasonKind::DeviceDataError),
+            ("analysis_config_change", EndReasonKind::AnalysisConfigChange),
+            ("paused", EndReasonKind::Paused),
         ];
         for (s, expected) in pairs {
             let k = EndReasonKind::from_reason_str(s);
