@@ -23,6 +23,7 @@
 pub mod error;
 pub mod reader;
 pub mod types;
+pub mod writer;
 
 mod footer;
 mod format;
@@ -34,5 +35,6 @@ pub use reader::Reader;
 pub use types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair, uuid_to_str,
 };
+pub use writer::Writer;
 
 pub type Result<T> = std::result::Result<T, Error>;

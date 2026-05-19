@@ -28,3 +28,5 @@ target
 CLAUDE.md
 TODO.md
 examples/*.pod5
+docs/svb_crate_spec.md
+tests/data/*

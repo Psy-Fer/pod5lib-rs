@@ -199,6 +199,117 @@ pub fn parse(data: &[u8]) -> Result<Footer> {
     })
 }
 
+// ── Builder ───────────────────────────────────────────────────────────────────
+
+/// Serialize a POD5 FlatBuffers footer to bytes.
+///
+/// `contents`: slice of `(offset, length, content_type)` triples where
+/// content_type is the raw i16 value (0=ReadsTable, 1=SignalTable, 4=RunInfoTable).
+///
+/// The layout follows the standard FlatBuffers builder convention: vtables are
+/// placed immediately BEFORE their tables (positive soffset) so that the
+/// FlatBuffers verifier accepts the buffer without modification.
+///
+/// Layout (N = contents.len()):
+/// ```text
+/// [0..4]      root uoffset = 16  (Footer table at pos 16)
+/// [4..16]     Footer vtable (12 bytes)
+/// [16..36]    Footer table  (soffset=12, then 4 field uoffsets)
+/// [36..40+4N] contents vector: count + N element uoffsets
+/// [40+4N..52+4N]  EmbeddedFile vtable (shared, 12 bytes)
+/// [52+4N..]   N EmbeddedFile tables (24 bytes each)
+/// [52+28N..]  string data
+/// ```
+pub fn build_footer(
+    file_identifier: &str,
+    software: &str,
+    pod5_version: &str,
+    contents: &[(i64, i64, i16)],
+) -> Vec<u8> {
+    let n = contents.len() as u32;
+
+    // Fixed positions
+    let footer_vtable: u32 = 4; // Footer vtable at pos 4
+    let footer_table: u32 = 16; // Footer table at pos 16
+    let contents_vec: u32 = 36; // contents vector at pos 36
+    let ef_vtable: u32 = 40 + 4 * n; // EmbeddedFile vtable
+    let ef_start: u32 = 52 + 4 * n; // first EmbeddedFile table
+    let str_start: u32 = ef_start + 24 * n; // first string
+
+    // FlatBuffers strings: 4-byte length prefix + bytes + 1 null terminator,
+    // padded to a 4-byte boundary so the next string is also 4-byte aligned.
+    let flat_str_size = |s: &str| -> u32 { (4 + s.len() as u32 + 1 + 3) & !3 };
+
+    let str0 = str_start;
+    let str1 = str0 + flat_str_size(file_identifier);
+    let str2 = str1 + flat_str_size(software);
+
+    let mut buf = Vec::new();
+
+    // [0..4] root uoffset → Footer table
+    buf.extend_from_slice(&footer_table.to_le_bytes());
+
+    // [4..16] Footer vtable
+    buf.extend_from_slice(&12u16.to_le_bytes()); // vt_size
+    buf.extend_from_slice(&20u16.to_le_bytes()); // obj_size
+    buf.extend_from_slice(&4u16.to_le_bytes()); // field 0 at table+4
+    buf.extend_from_slice(&8u16.to_le_bytes()); // field 1 at table+8
+    buf.extend_from_slice(&12u16.to_le_bytes()); // field 2 at table+12
+    buf.extend_from_slice(&16u16.to_le_bytes()); // field 3 at table+16
+
+    // [16..36] Footer table: soffset (positive, vtable is before table) + 4 uoffsets
+    let footer_soffset = (footer_table - footer_vtable) as i32; // 16 - 4 = 12
+    buf.extend_from_slice(&footer_soffset.to_le_bytes());
+    // field uoffsets: stored at footer_table+4, +8, +12, +16
+    buf.extend_from_slice(&(str0 - (footer_table + 4)).to_le_bytes()); // field 0
+    buf.extend_from_slice(&(str1 - (footer_table + 8)).to_le_bytes()); // field 1
+    buf.extend_from_slice(&(str2 - (footer_table + 12)).to_le_bytes()); // field 2
+    buf.extend_from_slice(&(contents_vec - (footer_table + 16)).to_le_bytes()); // field 3
+
+    // [36..40+4N] contents vector: count + N element uoffsets
+    buf.extend_from_slice(&n.to_le_bytes());
+    for i in 0..n {
+        // element i stored at pos 40+4i; EF table i at ef_start+i*24
+        let elem_pos = 40 + 4 * i;
+        let target = ef_start + i * 24;
+        buf.extend_from_slice(&(target - elem_pos).to_le_bytes());
+    }
+
+    // [40+4N..52+4N] EmbeddedFile vtable (shared by all EF tables)
+    // EF table fields: i64 offset@+4, i64 length@+12, i16 format@+20, i16 content_type@+22
+    buf.extend_from_slice(&12u16.to_le_bytes()); // vt_size
+    buf.extend_from_slice(&24u16.to_le_bytes()); // obj_size
+    buf.extend_from_slice(&4u16.to_le_bytes()); // field 0: i64 offset
+    buf.extend_from_slice(&12u16.to_le_bytes()); // field 1: i64 length
+    buf.extend_from_slice(&20u16.to_le_bytes()); // field 2: i16 format
+    buf.extend_from_slice(&22u16.to_le_bytes()); // field 3: i16 content_type
+
+    // [52+4N..] EmbeddedFile tables (24 bytes each)
+    for (i, &(offset, length, content_type)) in contents.iter().enumerate() {
+        // EF table i at ef_start + i*24; EF vtable at ef_vtable
+        // soffset = table_pos - vtable_pos (must be positive: table is after vtable)
+        let table_pos = ef_start + i as u32 * 24;
+        let soffset = (table_pos - ef_vtable) as i32;
+        buf.extend_from_slice(&soffset.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+        buf.extend_from_slice(&length.to_le_bytes());
+        buf.extend_from_slice(&0i16.to_le_bytes()); // format = FeatherV2
+        buf.extend_from_slice(&content_type.to_le_bytes());
+    }
+
+    // Strings: u32 length + UTF-8 bytes + null terminator + alignment padding.
+    for s in [file_identifier, software, pod5_version] {
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+        buf.push(0); // null terminator required by FlatBuffers verifier
+        let written = 4 + s.len() + 1;
+        let pad = ((written + 3) & !3) - written;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+    }
+
+    buf
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -272,6 +383,42 @@ mod tests {
         assert_eq!(footer.file_identifier, "my-uuid");
         assert_eq!(footer.software, "test-software");
         assert_eq!(footer.pod5_version, "1.2.3");
+        assert!(footer.contents.is_empty());
+    }
+
+    #[test]
+    fn build_parse_round_trip_with_contents() {
+        let contents = vec![
+            (1024i64, 512i64, 4i16),  // RunInfoTable
+            (2048i64, 1024i64, 1i16), // SignalTable
+            (4096i64, 2048i64, 0i16), // ReadsTable
+        ];
+        let fb = build_footer("file-uuid", "pod5-rs/0.1", "1.0.0", &contents);
+        let footer = parse(&fb).expect("round-trip parse failed");
+
+        assert_eq!(footer.file_identifier, "file-uuid");
+        assert_eq!(footer.software, "pod5-rs/0.1");
+        assert_eq!(footer.pod5_version, "1.0.0");
+        assert_eq!(footer.contents.len(), 3);
+
+        assert_eq!(footer.contents[0].offset, 1024);
+        assert_eq!(footer.contents[0].length, 512);
+        assert_eq!(footer.contents[0].content_type, ContentType::RunInfoTable);
+
+        assert_eq!(footer.contents[1].offset, 2048);
+        assert_eq!(footer.contents[1].length, 1024);
+        assert_eq!(footer.contents[1].content_type, ContentType::SignalTable);
+
+        assert_eq!(footer.contents[2].offset, 4096);
+        assert_eq!(footer.contents[2].length, 2048);
+        assert_eq!(footer.contents[2].content_type, ContentType::ReadsTable);
+    }
+
+    #[test]
+    fn build_parse_empty_contents() {
+        let fb = build_footer("id", "sw", "ver", &[]);
+        let footer = parse(&fb).expect("empty contents parse failed");
+        assert_eq!(footer.file_identifier, "id");
         assert!(footer.contents.is_empty());
     }
 

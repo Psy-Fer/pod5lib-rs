@@ -90,6 +90,57 @@ impl SignalTable {
     }
 }
 
+// ── VBZ compression ───────────────────────────────────────────────────────────
+
+/// Compress raw ADC i16 samples to a VBZ blob.
+///
+/// Pipeline (reverse of decompression): delta → zigzag → SVB16 → zstd
+pub fn compress_vbz(samples: &[i16]) -> crate::Result<Vec<u8>> {
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut prev: i16 = 0;
+    let zigzag: Vec<u16> = samples
+        .iter()
+        .map(|&s| {
+            let delta = s.wrapping_sub(prev);
+            prev = s;
+            ((delta << 1) ^ (delta >> 15)) as u16
+        })
+        .collect();
+
+    let svb = encode_svb16(&zigzag);
+    zstd::bulk::compress(&svb, 0).map_err(|e| crate::Error::Vbz(format!("zstd compress: {e}")))
+}
+
+/// Encode u16 values as SVB16 (1-bit-per-value control stream, LSB-first).
+///
+/// bit=0 → write 1 data byte (value fits in u8)
+/// bit=1 → write 2 data bytes LE (value requires u16)
+pub(crate) fn encode_svb16(values: &[u16]) -> Vec<u8> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let n = values.len();
+    let ctrl_len = n.div_ceil(8);
+    let mut ctrl = vec![0u8; ctrl_len];
+    let mut data: Vec<u8> = Vec::with_capacity(n * 2);
+
+    for (i, &v) in values.iter().enumerate() {
+        if v <= 0xFF {
+            data.push(v as u8);
+        } else {
+            ctrl[i / 8] |= 1 << (i % 8);
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    let mut out = ctrl;
+    out.extend_from_slice(&data);
+    out
+}
+
 // ── VBZ decompression ────────────────────────────────────────────────────────
 
 /// Decompress one VBZ blob to `num_samples` raw ADC values.
@@ -269,6 +320,40 @@ mod tests {
     }
 
     // ── VBZ ──────────────────────────────────────────────────────────────
+
+    // ── SVB16 encode ─────────────────────────────────────────────────────
+
+    #[test]
+    fn svb16_encode_decode_round_trip() {
+        let values: Vec<u16> = vec![0, 1, 255, 256, 300, 1000, 65535];
+        let encoded = encode_svb16(&values);
+        let decoded = decode_svb16(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    // ── VBZ compress/decompress ───────────────────────────────────────────
+
+    #[test]
+    fn compress_vbz_empty() {
+        let result = compress_vbz(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compress_decompress_round_trip() {
+        let samples: Vec<i16> = vec![100, 105, 98, 200, -50, 0, 32767, -32768];
+        let blob = compress_vbz(&samples).unwrap();
+        let recovered = decompress_vbz(&blob, samples.len()).unwrap();
+        assert_eq!(recovered, samples);
+    }
+
+    #[test]
+    fn compress_decompress_flat_signal() {
+        let samples: Vec<i16> = vec![512; 1000];
+        let blob = compress_vbz(&samples).unwrap();
+        let recovered = decompress_vbz(&blob, samples.len()).unwrap();
+        assert_eq!(recovered, samples);
+    }
 
     #[test]
     fn decompress_vbz_zero_samples() {
