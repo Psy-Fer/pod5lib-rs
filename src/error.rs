@@ -39,4 +39,7 @@ pub enum Error {
 
     #[error("file_identifier mismatch: {0} table schema has '{1}', footer has '{2}'")]
     FileIdentifierMismatch(String, String, String),
+
+    #[error("run_info column references unknown acquisition_id: '{0}'")]
+    MissingRunInfo(String),
 }
