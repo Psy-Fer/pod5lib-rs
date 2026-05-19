@@ -1,5 +1,5 @@
 [package]
-name = "pod5-rs"
+name = "pod5"
 version = "0.1.0"
 edition = "2024"
 description = "Pure Rust library for reading and writing POD5 nanopore sequencing files"

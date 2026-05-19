@@ -126,8 +126,8 @@ impl Writer {
     pub fn new() -> Self {
         Self {
             file_identifier: String::new(),
-            software: "pod5-rs".to_string(),
-            pod5_version: "1.0.0".to_string(),
+            software: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_string(),
+            pod5_version: env!("CARGO_PKG_VERSION").to_string(),
             reads: Vec::new(),
         }
     }
@@ -205,8 +205,8 @@ impl<W: Write> StreamingWriter<W> {
     pub fn new(sink: W) -> Self {
         Self {
             file_identifier: String::new(),
-            software: "pod5-rs".to_string(),
-            pod5_version: "1.0.0".to_string(),
+            software: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_string(),
+            pod5_version: env!("CARGO_PKG_VERSION").to_string(),
             sink,
             run_infos: Vec::new(),
             ri_id_to_idx: HashMap::new(),
