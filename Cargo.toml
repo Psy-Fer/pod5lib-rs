@@ -1,0 +1,18 @@
+[package]
+name = "pod5-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust library for reading and writing POD5 nanopore sequencing files"
+license = "MIT"
+
+[lib]
+name = "pod5"
+path = "src/lib.rs"
+
+[dependencies]
+# Apache Arrow IPC reading (Reads/Signal/RunInfo tables are Arrow IPC / Feather v2)
+arrow = { version = "53", default-features = false, features = ["ipc"] }
+# Signal decompression: VBZ = delta+zigzag+SVB16+zstd
+zstd = { version = "0.13", default-features = false }
+# Error derivation
+thiserror = "2"

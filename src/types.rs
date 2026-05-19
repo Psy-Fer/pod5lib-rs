@@ -1,0 +1,218 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::Result;
+use crate::signal::SignalTable;
+
+// ── UUID helpers ──────────────────────────────────────────────────────────────
+
+/// Format 16 raw bytes stored in POD5 `bytes_le` (mixed-endian Windows GUID) layout
+/// into the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` string.
+pub fn uuid_to_str(b: &[u8; 16]) -> String {
+    let g1 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let g2 = u16::from_le_bytes([b[4], b[5]]);
+    let g3 = u16::from_le_bytes([b[6], b[7]]);
+    let g4 = u16::from_be_bytes([b[8], b[9]]);
+    let g5 = (b[10] as u64) << 40
+        | (b[11] as u64) << 32
+        | (b[12] as u64) << 24
+        | (b[13] as u64) << 16
+        | (b[14] as u64) << 8
+        | b[15] as u64;
+    format!("{g1:08x}-{g2:04x}-{g3:04x}-{g4:04x}-{g5:012x}")
+}
+
+// ── Pore ──────────────────────────────────────────────────────────────────────
+
+/// Physical pore location on the flow cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pore {
+    /// 1-indexed channel number.
+    pub channel: u16,
+    /// 1-indexed well number.
+    pub well: u8,
+    /// Pore type identifier string (e.g. `"pore_type_not_set"`).
+    pub pore_type: String,
+}
+
+// ── Calibration ───────────────────────────────────────────────────────────────
+
+/// ADC → picoamp calibration parameters.
+///
+/// `pA = (adc - offset) * scale`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Calibration {
+    pub offset: f32,
+    pub scale: f32,
+}
+
+impl Calibration {
+    /// Build from the `adc_range` and `digitisation` values stored in RunInfo.
+    pub fn from_range(offset: f32, adc_range: f32, digitisation: f32) -> Self {
+        Self {
+            offset,
+            scale: adc_range / digitisation,
+        }
+    }
+
+    /// Convert a slice of raw ADC values to picoamps.
+    pub fn to_pa(&self, adc: &[i16]) -> Vec<f32> {
+        adc.iter()
+            .map(|&s| (s as f32 - self.offset) * self.scale)
+            .collect()
+    }
+}
+
+// ── EndReason ─────────────────────────────────────────────────────────────────
+
+/// Why a read was terminated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndReasonKind {
+    Unknown,
+    MuxChange,
+    UnblockMuxChange,
+    DataServiceUnblockMuxChange,
+    SignalPositive,
+    SignalNegative,
+    Other(u8),
+}
+
+impl EndReasonKind {
+    pub fn from_reason_str(s: &str) -> Self {
+        match s {
+            "unknown" => Self::Unknown,
+            "mux_change" => Self::MuxChange,
+            "unblock_mux_change" => Self::UnblockMuxChange,
+            "data_service_unblock_mux_change" => Self::DataServiceUnblockMuxChange,
+            "signal_positive" => Self::SignalPositive,
+            "signal_negative" => Self::SignalNegative,
+            _ => Self::Other(0),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::MuxChange => "mux_change",
+            Self::UnblockMuxChange => "unblock_mux_change",
+            Self::DataServiceUnblockMuxChange => "data_service_unblock_mux_change",
+            Self::SignalPositive => "signal_positive",
+            Self::SignalNegative => "signal_negative",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndReason {
+    pub reason: EndReasonKind,
+    /// Whether the read termination was externally forced (e.g. unblock).
+    pub forced: bool,
+}
+
+// ── ScaleShift ────────────────────────────────────────────────────────────────
+
+/// Optional (shift, scale) pair; `f32::NAN` when unavailable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShiftScalePair {
+    pub shift: f32,
+    pub scale: f32,
+}
+
+impl ShiftScalePair {
+    pub const UNAVAILABLE: Self = Self {
+        shift: f32::NAN,
+        scale: f32::NAN,
+    };
+
+    pub fn is_available(&self) -> bool {
+        self.shift.is_finite() && self.scale.is_finite()
+    }
+}
+
+// ── RunInfo ───────────────────────────────────────────────────────────────────
+
+/// Per-experiment run context (one entry per MinKNOW acquisition).
+#[derive(Debug, Clone)]
+pub struct RunInfo {
+    pub acquisition_id: String,
+    /// Milliseconds since UNIX epoch (UTC).
+    pub acquisition_start_time_ms: i64,
+    pub adc_max: i16,
+    pub adc_min: i16,
+    pub context_tags: HashMap<String, String>,
+    pub experiment_name: String,
+    pub flow_cell_id: String,
+    pub flow_cell_product_code: String,
+    pub protocol_name: String,
+    pub protocol_run_id: String,
+    pub protocol_start_time_ms: i64,
+    pub sample_id: String,
+    pub sample_rate: u16,
+    pub sequencing_kit: String,
+    pub sequencer_position: String,
+    pub sequencer_position_type: String,
+    pub software: String,
+    pub system_name: String,
+    pub system_type: String,
+    pub tracking_id: HashMap<String, String>,
+}
+
+impl RunInfo {
+    /// ADC digitisation: total number of ADC levels = `adc_max - adc_min + 1`.
+    pub fn digitisation(&self) -> f32 {
+        (self.adc_max as i32 - self.adc_min as i32 + 1) as f32
+    }
+}
+
+// ── ReadRecord ────────────────────────────────────────────────────────────────
+
+/// All metadata and signal for one nanopore read.
+///
+/// Matches the Python `pod5.ReadRecord` public API field for field.
+#[derive(Debug, Clone)]
+pub struct ReadRecord {
+    /// 16-byte UUID in POD5 `bytes_le` layout. Use [`uuid_to_str`] to display.
+    pub read_id: [u8; 16],
+    pub read_number: u32,
+    pub pore: Pore,
+    pub calibration: Calibration,
+    pub end_reason: EndReason,
+    pub run_info: Arc<RunInfo>,
+    /// Level immediately before the read (pA).
+    pub median_before: f32,
+    /// Total number of ADC samples in this read.
+    pub num_samples: u64,
+    /// Absolute sample index in the acquisition where this read began.
+    pub start_sample: u64,
+    pub tracked_scaling: ShiftScalePair,
+    pub predicted_scaling: ShiftScalePair,
+    pub num_minknow_events: u64,
+    pub num_reads_since_mux_change: u32,
+    /// Seconds since the last mux change.
+    pub time_since_mux_change: f32,
+    /// Open-pore level for this read (pA).
+    pub open_pore_level: f32,
+
+    // Private: signal lazy-load backing.
+    pub(crate) signal_row_indices: Vec<u64>,
+    pub(crate) signal_table: Arc<SignalTable>,
+}
+
+impl ReadRecord {
+    /// Human-readable UUID string (e.g. `"a1b2c3d4-..."`).
+    pub fn read_id_str(&self) -> String {
+        uuid_to_str(&self.read_id)
+    }
+
+    /// Decompress and return all raw ADC samples for this read as `i16`.
+    pub fn signal(&self) -> Result<Vec<i16>> {
+        self.signal_table.samples_for_rows(&self.signal_row_indices)
+    }
+
+    /// Decompress and calibrate signal to picoamps (`f32`).
+    pub fn signal_pa(&self) -> Result<Vec<f32>> {
+        let adc = self.signal()?;
+        Ok(self.calibration.to_pa(&adc))
+    }
+}
