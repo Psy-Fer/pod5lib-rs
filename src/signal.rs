@@ -22,7 +22,7 @@ use crate::{Error, Result};
 /// Compressed blobs are borrowed directly from Arrow's `Arc`-backed buffers at
 /// decompression time.
 #[derive(Debug)]
-pub struct SignalTable {
+pub(crate) struct SignalTable {
     /// Arrow IPC batches kept alive so we can borrow signal bytes from them.
     pub(crate) batches: Vec<RecordBatch>,
     /// One entry per signal row in the file (across all batches).
@@ -95,7 +95,7 @@ impl SignalTable {
 /// Compress raw ADC i16 samples to a VBZ blob.
 ///
 /// Pipeline (reverse of decompression): delta → zigzag → SVB16 → zstd
-pub fn compress_vbz(samples: &[i16]) -> crate::Result<Vec<u8>> {
+pub(crate) fn compress_vbz(samples: &[i16]) -> crate::Result<Vec<u8>> {
     if samples.is_empty() {
         return Ok(Vec::new());
     }
@@ -147,7 +147,7 @@ pub(crate) fn encode_svb16(values: &[u16]) -> Vec<u8> {
 ///
 /// The blob is a raw zstd frame; after zstd decompression the payload is
 /// SVB16 + zigzag-delta encoded i16 values.
-pub fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
+pub(crate) fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
     if num_samples == 0 {
         return Ok(Vec::new());
     }

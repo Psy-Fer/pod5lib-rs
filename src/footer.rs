@@ -104,7 +104,7 @@ impl<'a> Fb<'a> {
 // ── Domain types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentType {
+pub(crate) enum ContentType {
     ReadsTable,
     SignalTable,
     RunInfoTable,
@@ -124,7 +124,7 @@ impl ContentType {
 }
 
 #[derive(Debug)]
-pub struct EmbeddedFile {
+pub(crate) struct EmbeddedFile {
     /// Absolute byte offset in the POD5 file.
     pub offset: i64,
     /// Byte length of the embedded Arrow IPC file, excluding alignment padding.
@@ -133,7 +133,7 @@ pub struct EmbeddedFile {
 }
 
 #[derive(Debug)]
-pub struct Footer {
+pub(crate) struct Footer {
     pub file_identifier: String,
     pub pod5_version: String,
     pub software: String,
@@ -142,7 +142,7 @@ pub struct Footer {
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
-pub fn parse(data: &[u8]) -> Result<Footer> {
+pub(crate) fn parse(data: &[u8]) -> Result<Footer> {
     if data.len() < 4 {
         return Err(Error::FlatBuffers("buffer too short".into()));
     }
@@ -220,7 +220,7 @@ pub fn parse(data: &[u8]) -> Result<Footer> {
 /// [52+4N..]   N EmbeddedFile tables (24 bytes each)
 /// [52+28N..]  string data
 /// ```
-pub fn build_footer(
+pub(crate) fn build_footer(
     file_identifier: &str,
     software: &str,
     pod5_version: &str,

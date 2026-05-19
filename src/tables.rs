@@ -27,7 +27,7 @@ use crate::types::{
 
 /// Read an embedded Arrow IPC section from `file` into memory, then drive the
 /// arrow-ipc `FileReader` over it to collect all record batches.
-pub fn read_ipc_section<R: Read + Seek>(
+pub(crate) fn read_ipc_section<R: Read + Seek>(
     reader: &mut R,
     offset: u64,
     length: u64,
@@ -109,7 +109,7 @@ fn map_to_hashmap(batch: &RecordBatch, name: &str, i: usize) -> Result<HashMap<S
 
 // ── RunInfo table ─────────────────────────────────────────────────────────────
 
-pub fn parse_run_info_batches(batches: &[RecordBatch]) -> Result<Vec<Arc<RunInfo>>> {
+pub(crate) fn parse_run_info_batches(batches: &[RecordBatch]) -> Result<Vec<Arc<RunInfo>>> {
     let mut out = Vec::new();
     for batch in batches {
         let n = batch.num_rows();
@@ -172,7 +172,7 @@ pub fn parse_run_info_batches(batches: &[RecordBatch]) -> Result<Vec<Arc<RunInfo
 /// The `signal` column may be:
 ///   - `LargeBinary` with extension `minknow.vbz`  → compressed
 ///   - `LargeList<Int16>`                          → uncompressed
-pub fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTable> {
+pub(crate) fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTable> {
     let mut index = Vec::new();
 
     for (batch_idx, batch) in batches.iter().enumerate() {
@@ -204,7 +204,7 @@ pub fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTable> {
 ///
 /// `run_infos` must already be built from the RunInfo table; the `run_info`
 /// dictionary value (an acquisition_id string) is matched against `run_infos`.
-pub fn parse_reads_batches(
+pub(crate) fn parse_reads_batches(
     batches: &[RecordBatch],
     run_infos: &[Arc<RunInfo>],
     signal_table: Arc<SignalTable>,

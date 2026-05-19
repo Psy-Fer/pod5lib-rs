@@ -20,15 +20,14 @@
 //!     let _ = read.signal_pa().unwrap();
 //! }
 //! ```
-pub mod error;
-pub mod reader;
-pub mod types;
-pub mod writer;
-
+mod error;
 mod footer;
 mod format;
+mod reader;
 mod signal;
 mod tables;
+mod types;
+mod writer;
 
 pub use error::Error;
 pub use reader::Reader;
