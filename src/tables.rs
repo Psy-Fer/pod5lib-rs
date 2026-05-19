@@ -78,17 +78,6 @@ fn dict_str<'a>(batch: &'a RecordBatch, name: &str, i: usize) -> Result<&'a str>
     Ok(values.value(key))
 }
 
-/// Get the int16 key (row index into another table) from a dictionary column.
-fn dict_key(batch: &RecordBatch, name: &str, i: usize) -> Result<i16> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| Error::MissingColumn(name.into()))?;
-    let dict = col
-        .as_any()
-        .downcast_ref::<DictionaryArray<Int16Type>>()
-        .ok_or_else(|| Error::TypeMismatch(name.into()))?;
-    Ok(dict.keys().value(i))
-}
 
 /// Extract a `map(utf8, utf8)` column at row `i` as `HashMap`.
 fn map_to_hashmap(batch: &RecordBatch, name: &str, i: usize) -> Result<HashMap<String, String>> {
@@ -215,12 +204,17 @@ pub fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTable> {
 /// Parse all Reads-table batches into `ReadRecord` structs.
 ///
 /// `run_infos` must already be built from the RunInfo table; the `run_info`
-/// dictionary key is used as a direct row index into `run_infos`.
+/// dictionary value (an acquisition_id string) is matched against `run_infos`.
 pub fn parse_reads_batches(
     batches: &[RecordBatch],
     run_infos: &[Arc<RunInfo>],
     signal_table: Arc<SignalTable>,
 ) -> Result<Vec<ReadRecord>> {
+    let run_info_by_id: HashMap<&str, Arc<RunInfo>> = run_infos
+        .iter()
+        .map(|ri| (ri.acquisition_id.as_str(), Arc::clone(ri)))
+        .collect();
+
     let mut out = Vec::new();
     for batch in batches {
         let n = batch.num_rows();
@@ -306,10 +300,10 @@ pub fn parse_reads_batches(
                 forced: end_reason_forced_col.value(i),
             };
 
-            // run_info: dictionary key = row index in RunInfo table
-            let ri_key = dict_key(batch, "run_info", i)? as usize;
-            let run_info = run_infos
-                .get(ri_key)
+            // run_info: match dictionary value (acquisition_id string) against RunInfo table
+            let acq_id = dict_str(batch, "run_info", i)?;
+            let run_info = run_info_by_id
+                .get(acq_id)
                 .cloned()
                 .unwrap_or_else(|| run_infos.last().cloned().unwrap());
 
