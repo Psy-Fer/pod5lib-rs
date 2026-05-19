@@ -200,6 +200,79 @@ fn get_read_by_id_bad_format_returns_none() {
     );
 }
 
+// ── Writer round-trip tests ───────────────────────────────────────────────────
+
+#[test]
+fn writer_round_trip_read_ids() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let src = pod5::Reader::open(&path).expect("open source");
+    let n = 3.min(src.len());
+
+    let mut writer = pod5::Writer::new();
+    writer.file_identifier = src.file_identifier().to_string();
+    writer.pod5_version = src.pod5_version().to_string();
+    for read in src.reads_iter().take(n) {
+        let signal = read.signal().expect("decompress");
+        writer.add_read(read.clone(), signal);
+    }
+
+    let mut buf = Vec::new();
+    writer.write_to(&mut buf).expect("write_to failed");
+
+    let mut cursor = Cursor::new(buf);
+    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+
+    assert_eq!(dst.len(), n, "read count mismatch");
+    for (orig, written) in src.reads_iter().take(n).zip(dst.reads_iter()) {
+        assert_eq!(orig.read_id_str(), written.read_id_str(), "read_id mismatch");
+    }
+}
+
+#[test]
+fn writer_round_trip_signal() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let src = pod5::Reader::open(&path).expect("open source");
+    let n = 3.min(src.len());
+
+    let mut writer = pod5::Writer::new();
+    writer.file_identifier = src.file_identifier().to_string();
+    writer.pod5_version = src.pod5_version().to_string();
+    let orig_signals: Vec<Vec<i16>> = src
+        .reads_iter()
+        .take(n)
+        .map(|r| r.signal().expect("decompress"))
+        .collect();
+    for (read, signal) in src.reads_iter().take(n).zip(orig_signals.iter()) {
+        writer.add_read(read.clone(), signal.clone());
+    }
+
+    let mut buf = Vec::new();
+    writer.write_to(&mut buf).expect("write_to failed");
+
+    let mut cursor = Cursor::new(buf);
+    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+
+    for (orig_sig, written) in orig_signals.iter().zip(dst.reads_iter()) {
+        let written_sig = written.signal().expect("decompress written");
+        assert_eq!(orig_sig, &written_sig, "signal mismatch");
+    }
+}
+
+#[test]
+fn writer_empty_file() {
+    let writer = pod5::Writer::new();
+    let mut buf = Vec::new();
+    writer.write_to(&mut buf).expect("write_to failed");
+
+    let mut cursor = Cursor::new(buf);
+    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+    assert!(dst.is_empty());
+}
+
 // ── Reader error-path tests (no file needed) ──────────────────────────────────
 
 const POD5_SIG: [u8; 8] = [0x8B, b'P', b'O', b'D', 0x0D, 0x0A, 0x1A, 0x0A];
