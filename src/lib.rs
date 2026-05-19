@@ -35,6 +35,6 @@ pub use reader::Reader;
 pub use types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair, uuid_to_str,
 };
-pub use writer::Writer;
+pub use writer::{StreamingWriter, Writer};
 
 pub type Result<T> = std::result::Result<T, Error>;
