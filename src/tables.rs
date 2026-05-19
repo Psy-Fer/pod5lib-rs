@@ -9,8 +9,8 @@ use std::sync::Arc;
 use arrow::array::types::Int16Type;
 use arrow::array::{
     Array, BooleanArray, DictionaryArray, FixedSizeBinaryArray, Float32Array, Int16Array,
-    LargeBinaryArray, LargeListArray, ListArray, MapArray, StringArray, TimestampMillisecondArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    ListArray, MapArray, StringArray, TimestampMillisecondArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
 };
 use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader;
@@ -18,7 +18,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::Result;
 use crate::error::Error;
-use crate::signal::{SignalRow, SignalTable};
+use crate::signal::{SignalRowRef, SignalTable};
 use crate::types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair,
 };
@@ -178,17 +178,19 @@ pub fn parse_run_info_batches(batches: &[RecordBatch]) -> Result<Vec<Arc<RunInfo
 
 /// Build a `SignalTable` from Arrow IPC record batches.
 ///
+/// Takes ownership of the batches so `SignalTable` can borrow from their buffers
+/// at decompression time — no byte copying.
+///
 /// The `signal` column may be:
-///   - `LargeBinary` with extension `minknow.vbz`  → compressed, `compressed=true`
-///   - `LargeList<Int16>`                          → uncompressed, `compressed=false`
-pub fn parse_signal_batches(batches: &[RecordBatch]) -> Result<SignalTable> {
-    let mut rows = Vec::new();
+///   - `LargeBinary` with extension `minknow.vbz`  → compressed
+///   - `LargeList<Int16>`                          → uncompressed
+pub fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTable> {
+    let mut index = Vec::new();
 
-    for batch in batches {
+    for (batch_idx, batch) in batches.iter().enumerate() {
         let n = batch.num_rows();
         let samples_col = col!(batch, "samples", UInt32Array)?;
 
-        // Detect whether the signal column is compressed (LargeBinary) or raw (LargeList<Int16>)
         let signal_col = batch
             .column_by_name("signal")
             .ok_or_else(|| Error::MissingColumn("signal".into()))?;
@@ -196,39 +198,16 @@ pub fn parse_signal_batches(batches: &[RecordBatch]) -> Result<SignalTable> {
         let compressed = !matches!(signal_col.data_type(), DataType::LargeList(_));
 
         for i in 0..n {
-            let num_samples = samples_col.value(i);
-
-            let data: Vec<u8> = if compressed {
-                let bin = signal_col
-                    .as_any()
-                    .downcast_ref::<LargeBinaryArray>()
-                    .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
-                bin.value(i).to_vec()
-            } else {
-                let list = signal_col
-                    .as_any()
-                    .downcast_ref::<LargeListArray>()
-                    .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
-                let arr = list.value(i);
-                let int16 = arr
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .ok_or_else(|| Error::TypeMismatch("signal (inner)".into()))?;
-                let mut bytes = Vec::with_capacity(int16.len() * 2);
-                for j in 0..int16.len() {
-                    bytes.extend_from_slice(&int16.value(j).to_le_bytes());
-                }
-                bytes
-            };
-
-            rows.push(SignalRow {
-                data,
-                num_samples,
+            index.push(SignalRowRef {
+                batch_idx: batch_idx as u32,
+                row_in_batch: i as u32,
+                num_samples: samples_col.value(i),
                 compressed,
             });
         }
     }
-    Ok(SignalTable { rows })
+
+    Ok(SignalTable { batches, index })
 }
 
 // ── Reads table ───────────────────────────────────────────────────────────────

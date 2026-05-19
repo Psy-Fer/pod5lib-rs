@@ -4,27 +4,36 @@
 ///   int16 ADC samples
 ///   → delta encode (differences between adjacent samples)
 ///   → zigzag encode (signed i16 → unsigned u16, small absolute values → small codes)
-///   → SVB16 encode (StreamVByte for 16-bit: 1-2 bytes/value, 2-bit control stream)
+///   → SVB16 encode (StreamVByte for 16-bit: 1-2 bytes/value, 1-bit control stream)
 ///   → zstd compress
 ///
 /// On-disk blob layout:
-///   [original_size: u32 LE]  ← byte count of original int16 data (= N * 2)
-///   [zstd-compressed SVB stream...]
+///   [zstd-compressed SVB stream...]  (no separate length header; Arrow `samples` column carries N)
+use arrow::array::{Array, Int16Array, LargeBinaryArray, LargeListArray};
+use arrow::record_batch::RecordBatch;
+
 use crate::{Error, Result};
 
 // ── Signal table ─────────────────────────────────────────────────────────────
 
-/// Lightweight in-memory store of all signal rows loaded from the Signal table.
-/// Each row is either VBZ-compressed bytes or raw int16 bytes.
+/// In-memory signal store.
+///
+/// Holds Arrow `RecordBatch` objects from the Signal IPC section — no byte copying.
+/// Compressed blobs are borrowed directly from Arrow's `Arc`-backed buffers at
+/// decompression time.
 #[derive(Debug)]
 pub struct SignalTable {
-    pub(crate) rows: Vec<SignalRow>,
+    /// Arrow IPC batches kept alive so we can borrow signal bytes from them.
+    pub(crate) batches: Vec<RecordBatch>,
+    /// One entry per signal row in the file (across all batches).
+    pub(crate) index: Vec<SignalRowRef>,
 }
 
-#[derive(Debug)]
-pub(crate) struct SignalRow {
-    /// Raw bytes: either VBZ-compressed or uncompressed `[i16]` little-endian.
-    pub data: Vec<u8>,
+/// Lightweight pointer into one row of one Arrow batch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SignalRowRef {
+    pub batch_idx: u32,
+    pub row_in_batch: u32,
     pub num_samples: u32,
     pub compressed: bool,
 }
@@ -35,24 +44,45 @@ impl SignalTable {
         let total: usize = indices
             .iter()
             .map(|&i| {
-                self.rows
+                self.index
                     .get(i as usize)
                     .map_or(0, |r| r.num_samples as usize)
             })
             .sum();
         let mut out = Vec::with_capacity(total);
+
         for &idx in indices {
             let row = self
-                .rows
+                .index
                 .get(idx as usize)
-                .ok_or(Error::SignalRowOutOfRange(idx, self.rows.len()))?;
+                .ok_or(Error::SignalRowOutOfRange(idx, self.index.len()))?;
+
+            let batch = &self.batches[row.batch_idx as usize];
+            let col = batch
+                .column_by_name("signal")
+                .ok_or_else(|| Error::MissingColumn("signal".into()))?;
+            let i = row.row_in_batch as usize;
+
             if row.compressed {
-                let mut chunk = decompress_vbz(&row.data, row.num_samples as usize)?;
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<LargeBinaryArray>()
+                    .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
+                // arr.value(i) is a &[u8] borrowed from Arrow's Arc-backed buffer — no copy.
+                let mut chunk = decompress_vbz(arr.value(i), row.num_samples as usize)?;
                 out.append(&mut chunk);
             } else {
-                // Uncompressed: raw little-endian i16 bytes
-                for chunk in row.data.chunks_exact(2) {
-                    out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                let list = col
+                    .as_any()
+                    .downcast_ref::<LargeListArray>()
+                    .ok_or_else(|| Error::TypeMismatch("signal (uncompressed list)".into()))?;
+                let arr = list.value(i);
+                let int16 = arr
+                    .as_any()
+                    .downcast_ref::<Int16Array>()
+                    .ok_or_else(|| Error::TypeMismatch("signal (uncompressed int16)".into()))?;
+                for j in 0..int16.len() {
+                    out.push(int16.value(j));
                 }
             }
         }
@@ -64,24 +94,21 @@ impl SignalTable {
 
 /// Decompress one VBZ blob to `num_samples` raw ADC values.
 ///
-/// The blob is a raw zstd frame (magic `0xFD 0x2F 0xB5 0x28`); there is no
-/// separate length header.  After zstd decompression the payload is a
-/// SVB16 + zigzag-delta encoded stream of exactly `num_samples` int16 values.
+/// The blob is a raw zstd frame; after zstd decompression the payload is
+/// SVB16 + zigzag-delta encoded i16 values.
 pub fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
     if num_samples == 0 {
         return Ok(Vec::new());
     }
 
-    // SVB16 output: ceil(N/4) control bytes + at most N*2 data bytes ≈ N*2.25
-    let svb_cap = num_samples / 4 + 2 + num_samples * 2;
+    // SVB16 output: ceil(N/8) control bytes + at most N*2 data bytes
+    let svb_cap = num_samples / 8 + 1 + num_samples * 2;
 
     let svb_data =
         zstd::bulk::decompress(data, svb_cap).map_err(|e| Error::Vbz(format!("zstd: {e}")))?;
 
-    // SVB16 decode → zigzag values
     let zigzag = decode_svb16(&svb_data, num_samples)?;
 
-    // Zigzag + delta decode → original ADC samples
     let mut samples = Vec::with_capacity(num_samples);
     let mut prev: i16 = 0;
     for z in zigzag {
@@ -90,9 +117,7 @@ pub fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
         samples.push(prev);
     }
 
-    // Truncate to exactly what the Signal table says (SVB may pad to 4-value boundary)
     samples.truncate(num_samples);
-
     Ok(samples)
 }
 
@@ -101,8 +126,8 @@ pub fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
 /// Decode a StreamVByte-16 stream of `n` unsigned 16-bit integers.
 ///
 /// VBZ uses **1 bit per value** packed LSB-first into control bytes (8 per byte):
-///   bit=0 → next 1 byte   encodes the value as u8 (value 0-255)
-///   bit=1 → next 2 bytes  encode the value as u16 LE (value 0-65535)
+///   bit=0 → next 1 byte  encodes the value as u8
+///   bit=1 → next 2 bytes encode the value as u16 LE
 ///
 /// Layout: `ceil(n/8)` control bytes, followed by the variable-length data bytes.
 fn decode_svb16(data: &[u8], n: usize) -> Result<Vec<u16>> {
@@ -156,6 +181,57 @@ fn zigzag_decode(n: u16) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{ArrayRef, Int16Builder, LargeListBuilder, UInt32Builder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// Build an uncompressed `SignalTable` from slices of i16 samples.
+    /// Each slice becomes one signal row via a `LargeList<Int16>` Arrow batch.
+    fn uncompressed_table(rows: &[&[i16]]) -> SignalTable {
+        let item_field = Arc::new(Field::new("item", DataType::Int16, true));
+        let mut list_builder = LargeListBuilder::new(Int16Builder::new());
+        let mut samples_builder = UInt32Builder::new();
+
+        let mut index = Vec::new();
+
+        for (row_in_batch, &samples) in rows.iter().enumerate() {
+            for &s in samples {
+                list_builder.values().append_value(s);
+            }
+            list_builder.append(true);
+            samples_builder.append_value(samples.len() as u32);
+
+            index.push(SignalRowRef {
+                batch_idx: 0,
+                row_in_batch: row_in_batch as u32,
+                num_samples: samples.len() as u32,
+                compressed: false,
+            });
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("signal", DataType::LargeList(item_field), false),
+            Field::new("samples", DataType::UInt32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(list_builder.finish()) as ArrayRef,
+                Arc::new(samples_builder.finish()) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        SignalTable {
+            batches: vec![batch],
+            index,
+        }
+    }
+
+    // ── Zigzag ────────────────────────────────────────────────────────────
 
     #[test]
     fn zigzag_round_trip() {
@@ -165,10 +241,11 @@ mod tests {
         }
     }
 
+    // ── SVB16 ────────────────────────────────────────────────────────────
+
     #[test]
     fn svb16_single_byte_values() {
-        // 4 values, all fit in 1 byte → bits = 0000 → ctrl byte = 0x00
-        // 1 ctrl byte (ceil(4/8)=1), then 4 data bytes
+        // 4 values, all fit in 1 byte → bits = 00000000 → ctrl = 0x00
         let data: Vec<u8> = vec![0x00, 0, 1, 2, 3];
         let out = decode_svb16(&data, 4).unwrap();
         assert_eq!(out, vec![0u16, 1, 2, 3]);
@@ -177,20 +254,21 @@ mod tests {
     #[test]
     fn svb16_two_byte_values() {
         // 1 value, needs 2 bytes → bit=1 → ctrl byte = 0b00000001 = 0x01
-        // 1 ctrl byte, then 2 data bytes for value 256 = [0x00, 0x01] LE
-        let data: Vec<u8> = vec![0x01, 0x00, 0x01];
+        let data: Vec<u8> = vec![0x01, 0x00, 0x01]; // ctrl, then 256 LE
         let out = decode_svb16(&data, 1).unwrap();
         assert_eq!(out, vec![256u16]);
     }
 
     #[test]
     fn svb16_mixed() {
-        // 2 values: first=5 (1 byte, bit=0), second=300 (2 bytes, bit=1)
-        // ctrl byte = 0b00000010 = 0x02 (bit 0=0 for first, bit 1=1 for second)
-        let data: Vec<u8> = vec![0x02, 5, 0x2C, 0x01]; // ctrl, then 5, then 300 LE
+        // val=5 (1 byte, bit=0), val=300 (2 bytes, bit=1)
+        // ctrl byte = 0b00000010 = 0x02
+        let data: Vec<u8> = vec![0x02, 5, 0x2C, 0x01];
         let out = decode_svb16(&data, 2).unwrap();
         assert_eq!(out, vec![5u16, 300u16]);
     }
+
+    // ── VBZ ──────────────────────────────────────────────────────────────
 
     #[test]
     fn decompress_vbz_zero_samples() {
@@ -204,42 +282,29 @@ mod tests {
         assert!(matches!(result, Err(crate::Error::Vbz(_))));
     }
 
+    // ── SignalTable ───────────────────────────────────────────────────────
+
     #[test]
     fn signal_table_row_out_of_range() {
-        let table = SignalTable { rows: vec![] };
+        let table = SignalTable {
+            batches: vec![],
+            index: vec![],
+        };
         let err = table.samples_for_rows(&[0]).unwrap_err();
         assert!(matches!(err, crate::Error::SignalRowOutOfRange(0, 0)));
     }
 
     #[test]
     fn signal_table_uncompressed_path() {
-        let table = SignalTable {
-            rows: vec![SignalRow {
-                data: vec![1u8, 0, 5u8, 0], // i16 LE: [1, 5]
-                num_samples: 2,
-                compressed: false,
-            }],
-        };
+        let table = uncompressed_table(&[&[1i16, 5i16]]);
         let result = table.samples_for_rows(&[0]).unwrap();
         assert_eq!(result, vec![1i16, 5i16]);
     }
 
     #[test]
     fn signal_table_multi_row_concat() {
-        let table = SignalTable {
-            rows: vec![
-                SignalRow {
-                    data: vec![1u8, 0, 2u8, 0],
-                    num_samples: 2,
-                    compressed: false,
-                },
-                SignalRow {
-                    data: vec![3u8, 0],
-                    num_samples: 1,
-                    compressed: false,
-                },
-            ],
-        };
+        // Two rows: [1, 2] and [3]
+        let table = uncompressed_table(&[&[1i16, 2i16], &[3i16]]);
         // indices [1, 0] → row 1 then row 0
         let result = table.samples_for_rows(&[1, 0]).unwrap();
         assert_eq!(result, vec![3i16, 1i16, 2i16]);

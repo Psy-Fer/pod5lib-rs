@@ -136,6 +136,70 @@ fn reads_by_id_not_found() {
     assert!(found.is_empty());
 }
 
+#[test]
+fn reads_iter_yields_all_reads() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let reader = pod5::Reader::open(&path).expect("open failed");
+    let count = reader.reads_iter().count();
+    assert_eq!(count, reader.len());
+}
+
+#[test]
+fn reads_iter_matches_reads_slice() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let reader = pod5::Reader::open(&path).expect("open failed");
+    for (iter_read, slice_read) in reader.reads_iter().zip(reader.reads()) {
+        assert_eq!(iter_read.read_id, slice_read.read_id);
+    }
+}
+
+#[test]
+fn get_read_by_id_finds_every_read() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let reader = pod5::Reader::open(&path).expect("open failed");
+    for read in reader.reads() {
+        let id = read.read_id_str();
+        let found = reader
+            .get_read_by_id(&id)
+            .expect("get_read_by_id returned None");
+        assert_eq!(found.read_id, read.read_id);
+    }
+}
+
+#[test]
+fn get_read_by_id_not_found() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let reader = pod5::Reader::open(&path).expect("open failed");
+    assert!(
+        reader
+            .get_read_by_id("00000000-0000-0000-0000-000000000000")
+            .is_none()
+    );
+}
+
+#[test]
+fn get_read_by_id_bad_format_returns_none() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let reader = pod5::Reader::open(&path).expect("open failed");
+    assert!(reader.get_read_by_id("not-a-uuid").is_none());
+    assert!(reader.get_read_by_id("").is_none());
+    assert!(
+        reader
+            .get_read_by_id("gggggggg-0000-0000-0000-000000000000")
+            .is_none()
+    );
+}
+
 // ── Reader error-path tests (no file needed) ──────────────────────────────────
 
 const POD5_SIG: [u8; 8] = [0x8B, b'P', b'O', b'D', 0x0D, 0x0A, 0x1A, 0x0A];
