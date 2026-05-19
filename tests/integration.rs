@@ -226,7 +226,11 @@ fn writer_round_trip_read_ids() {
 
     assert_eq!(dst.len(), n, "read count mismatch");
     for (orig, written) in src.reads_iter().take(n).zip(dst.reads_iter()) {
-        assert_eq!(orig.read_id_str(), written.read_id_str(), "read_id mismatch");
+        assert_eq!(
+            orig.read_id_str(),
+            written.read_id_str(),
+            "read_id mismatch"
+        );
     }
 }
 

@@ -293,7 +293,10 @@ mod tests {
             ("signal_negative", EndReasonKind::SignalNegative),
             ("api_request", EndReasonKind::ApiRequest),
             ("device_data_error", EndReasonKind::DeviceDataError),
-            ("analysis_config_change", EndReasonKind::AnalysisConfigChange),
+            (
+                "analysis_config_change",
+                EndReasonKind::AnalysisConfigChange,
+            ),
             ("paused", EndReasonKind::Paused),
         ];
         for (s, expected) in pairs {

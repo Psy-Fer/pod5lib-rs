@@ -78,7 +78,6 @@ fn dict_str<'a>(batch: &'a RecordBatch, name: &str, i: usize) -> Result<&'a str>
     Ok(values.value(key))
 }
 
-
 /// Extract a `map(utf8, utf8)` column at row `i` as `HashMap`.
 fn map_to_hashmap(batch: &RecordBatch, name: &str, i: usize) -> Result<HashMap<String, String>> {
     let col = batch
@@ -335,7 +334,11 @@ pub fn parse_reads_batches(
                 calibration,
                 end_reason,
                 run_info,
-                median_before: if median_before_col.is_null(i) { f32::NAN } else { median_before_col.value(i) },
+                median_before: if median_before_col.is_null(i) {
+                    f32::NAN
+                } else {
+                    median_before_col.value(i)
+                },
                 num_samples: num_samples_col.value(i),
                 start_sample: start_col.value(i),
                 tracked_scaling,
@@ -343,7 +346,9 @@ pub fn parse_reads_batches(
                 num_minknow_events: num_events_col.value(i),
                 num_reads_since_mux_change: num_reads_mux_col.map_or(0, |c| c.value(i)),
                 time_since_mux_change: time_mux_col.map_or(0.0, |c| c.value(i)),
-                open_pore_level: open_pore_col.map_or(f32::NAN, |c| if c.is_null(i) { f32::NAN } else { c.value(i) }),
+                open_pore_level: open_pore_col.map_or(f32::NAN, |c| {
+                    if c.is_null(i) { f32::NAN } else { c.value(i) }
+                }),
                 signal_row_indices,
                 signal_table: Arc::clone(&signal_table),
             });
