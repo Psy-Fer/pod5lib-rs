@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::thread;
 
 use arrow::array::builder::{
     BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Int16Builder, LargeBinaryBuilder,
@@ -17,18 +18,19 @@ use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow::record_batch::RecordBatch;
 
 use crate::Result;
+use crate::error::Error;
 use crate::footer;
 use crate::format::{FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8};
 use crate::signal::compress_vbz;
 use crate::types::{ReadRecord, RunInfo};
 
-// ── Compact per-read buffer ───────────────────────────────────────────────────
+/// Number of in-flight reads buffered between caller and writer thread.
+/// Bounds peak RSS to roughly CHANNEL_DEPTH × avg-VBZ-bytes-per-read.
+const CHANNEL_DEPTH: usize = 64;
 
-/// All per-read data needed to build the three IPC sections.
-///
-/// Signal is VBZ-compressed eagerly; no `Arc<SignalTable>` or raw `Vec<i16>`
-/// is retained after construction.
-struct BufferedRead {
+// ── Per-read metadata (no signal bytes) ──────────────────────────────────────
+
+struct ReadMeta {
     read_id: [u8; 16],
     read_number: u32,
     channel: u16,
@@ -50,39 +52,80 @@ struct BufferedRead {
     time_since_mux_change: f32,
     tracked_scaling_scale: f32,
     tracked_scaling_shift: f32,
+}
+
+fn read_meta_from_record(record: &ReadRecord, ri_idx: usize) -> ReadMeta {
+    ReadMeta {
+        read_id: record.read_id,
+        read_number: record.read_number,
+        channel: record.pore.channel,
+        well: record.pore.well,
+        pore_type: record.pore.pore_type.clone(),
+        calib_offset: record.calibration.offset,
+        calib_scale: record.calibration.scale,
+        median_before: record.median_before,
+        end_reason: record.end_reason.reason.as_str(),
+        end_reason_forced: record.end_reason.forced,
+        num_minknow_events: record.num_minknow_events,
+        num_reads_since_mux_change: record.num_reads_since_mux_change,
+        num_samples: record.num_samples,
+        open_pore_level: record.open_pore_level,
+        predicted_scaling_scale: record.predicted_scaling.scale,
+        predicted_scaling_shift: record.predicted_scaling.shift,
+        ri_idx,
+        start_sample: record.start_sample,
+        time_since_mux_change: record.time_since_mux_change,
+        tracked_scaling_scale: record.tracked_scaling.scale,
+        tracked_scaling_shift: record.tracked_scaling.shift,
+    }
+}
+
+// ── Message sent from caller thread to writer thread ─────────────────────────
+
+struct WriterMsg {
+    read_id: [u8; 16],
+    read_number: u32,
+    channel: u16,
+    well: u8,
+    pore_type: String,
+    calib_offset: f32,
+    calib_scale: f32,
+    median_before: f32,
+    end_reason: &'static str,
+    end_reason_forced: bool,
+    num_minknow_events: u64,
+    num_reads_since_mux_change: u32,
+    num_samples: u64,
+    open_pore_level: f32,
+    predicted_scaling_scale: f32,
+    predicted_scaling_shift: f32,
+    run_info: Arc<RunInfo>,
+    start_sample: u64,
+    time_since_mux_change: f32,
+    tracked_scaling_scale: f32,
+    tracked_scaling_shift: f32,
     vbz: Vec<u8>,
     vbz_num_samples: u32,
 }
 
-impl BufferedRead {
-    fn from_read(record: &ReadRecord, signal: &[i16], ri_idx: usize) -> Result<Self> {
-        let vbz = compress_vbz(signal)?;
-        Ok(Self {
-            read_id: record.read_id,
-            read_number: record.read_number,
-            channel: record.pore.channel,
-            well: record.pore.well,
-            pore_type: record.pore.pore_type.clone(),
-            calib_offset: record.calibration.offset,
-            calib_scale: record.calibration.scale,
-            median_before: record.median_before,
-            end_reason: record.end_reason.reason.as_str(),
-            end_reason_forced: record.end_reason.forced,
-            num_minknow_events: record.num_minknow_events,
-            num_reads_since_mux_change: record.num_reads_since_mux_change,
-            num_samples: record.num_samples,
-            open_pore_level: record.open_pore_level,
-            predicted_scaling_scale: record.predicted_scaling.scale,
-            predicted_scaling_shift: record.predicted_scaling.shift,
-            ri_idx,
-            start_sample: record.start_sample,
-            time_since_mux_change: record.time_since_mux_change,
-            tracked_scaling_scale: record.tracked_scaling.scale,
-            tracked_scaling_shift: record.tracked_scaling.shift,
-            vbz,
-            vbz_num_samples: signal.len() as u32,
-        })
-    }
+// ── Writer configuration ──────────────────────────────────────────────────────
+
+struct WriterConfig {
+    file_identifier: String,
+    software: String,
+    pod5_version: String,
+}
+
+// ── StreamingWriter state machine ─────────────────────────────────────────────
+
+enum WriterState {
+    Idle(BufWriter<File>),
+    Running {
+        tx: mpsc::SyncSender<WriterMsg>,
+        thread: thread::JoinHandle<Result<()>>,
+    },
+    /// Transient during `start()`; also set if the state is consumed and not restored.
+    Poisoned,
 }
 
 // ── Writer ────────────────────────────────────────────────────────────────────
@@ -150,25 +193,23 @@ impl Writer {
 
     /// Write to any `Write` sink (useful for testing with `Vec<u8>`).
     pub fn write_to<W: Write>(&self, out: &mut W) -> Result<()> {
-        let mut sw = StreamingWriter::new(out);
-        sw.file_identifier = self.file_identifier.clone();
-        sw.software = self.software.clone();
-        sw.pod5_version = self.pod5_version.clone();
-        for wr in &self.reads {
-            sw.write_read(&wr.record, &wr.signal)?;
-        }
-        sw.finish()
+        let cfg = WriterConfig {
+            file_identifier: self.file_identifier.clone(),
+            software: self.software.clone(),
+            pod5_version: self.pod5_version.clone(),
+        };
+        write_pod5_to_sink(out, &self.reads, &cfg)
     }
 }
 
 // ── StreamingWriter ───────────────────────────────────────────────────────────
 
-/// Memory-efficient POD5 writer that VBZ-compresses each read's signal
-/// immediately on [`Self::write_read`], rather than accumulating raw `i16` samples.
+/// Memory-efficient, threaded POD5 writer.
 ///
-/// The decompressed signal slice is not retained after each call to
-/// [`Self::write_read`], making this suitable for writing large files without holding
-/// all signal data in memory at once.
+/// VBZ compression runs on the calling thread; a background writer thread
+/// owns the `FileWriter` and flushes completed batches to disk.  A bounded
+/// channel (depth [`CHANNEL_DEPTH`]) limits in-flight reads so peak RSS stays
+/// near-constant regardless of file size.
 ///
 /// ```no_run
 /// use pod5::{Reader, StreamingWriter};
@@ -183,140 +224,359 @@ impl Writer {
 /// }
 /// writer.finish().unwrap();
 /// ```
-pub struct StreamingWriter<W: Write> {
+pub struct StreamingWriter {
     /// file_identifier stored in the footer (should be a UUID string).
     pub file_identifier: String,
     /// Software string recorded in the footer.
     pub software: String,
     /// POD5 spec version to record.
     pub pod5_version: String,
-    sink: W,
-    run_infos: Vec<Arc<RunInfo>>,
-    ri_id_to_idx: HashMap<String, usize>,
-    reads: Vec<BufferedRead>,
+    channel_depth: usize,
+    state: WriterState,
 }
 
-impl StreamingWriter<BufWriter<File>> {
-    /// Create a `StreamingWriter` writing to a new file at `path`.
+impl StreamingWriter {
+    /// Open `path` for writing and return a new `StreamingWriter`.
+    ///
+    /// Set `file_identifier` (and optionally `software`/`pod5_version`) before
+    /// the first call to [`Self::write_read`].  The background writer thread is
+    /// started lazily on the first write.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::create(path)?;
-        Ok(Self::new(BufWriter::new(file)))
-    }
-}
-
-impl<W: Write> StreamingWriter<W> {
-    /// Create a `StreamingWriter` writing to `sink`.
-    pub fn new(sink: W) -> Self {
-        Self {
+        Ok(Self {
             file_identifier: String::new(),
             software: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_string(),
             pod5_version: env!("CARGO_PKG_VERSION").to_string(),
-            sink,
-            run_infos: Vec::new(),
-            ri_id_to_idx: HashMap::new(),
-            reads: Vec::new(),
-        }
+            channel_depth: CHANNEL_DEPTH,
+            state: WriterState::Idle(BufWriter::new(file)),
+        })
     }
 
-    /// VBZ-compress `signal` and buffer the read's metadata.
-    ///
-    /// `signal` is not retained after this call returns.
-    pub fn write_read(&mut self, record: &ReadRecord, signal: &[i16]) -> Result<()> {
-        let ri_idx = match self
-            .ri_id_to_idx
-            .get(record.run_info.acquisition_id.as_str())
-        {
-            Some(&idx) => idx,
-            None => {
-                let idx = self.run_infos.len();
-                self.ri_id_to_idx
-                    .insert(record.run_info.acquisition_id.clone(), idx);
-                self.run_infos.push(Arc::clone(&record.run_info));
-                idx
-            }
+    /// Lazily start the writer thread, capturing the current config.
+    fn start(&mut self) -> Result<()> {
+        let cfg = WriterConfig {
+            file_identifier: self.file_identifier.clone(),
+            software: self.software.clone(),
+            pod5_version: self.pod5_version.clone(),
         };
-        self.reads
-            .push(BufferedRead::from_read(record, signal, ri_idx)?);
+        let out = match std::mem::replace(&mut self.state, WriterState::Poisoned) {
+            WriterState::Idle(f) => f,
+            _ => return Err(Error::WriterThreadDied),
+        };
+        let (tx, rx) = mpsc::sync_channel(self.channel_depth);
+        let thread = thread::spawn(move || run_writer_thread(out, cfg, rx));
+        self.state = WriterState::Running { tx, thread };
         Ok(())
     }
 
-    /// Finalise and write the complete POD5 file to the sink.
-    pub fn finish(mut self) -> Result<()> {
-        let section_marker = [0u8; SECTION_MARKER_LEN];
-
-        let ipc_meta = HashMap::from([
-            (
-                "MINKNOW:file_identifier".to_string(),
-                self.file_identifier.clone(),
-            ),
-            ("MINKNOW:software".to_string(), self.software.clone()),
-            (
-                "MINKNOW:pod5_version".to_string(),
-                self.pod5_version.clone(),
-            ),
-        ]);
-
-        let runinfo_ipc = build_run_info_ipc(&self.run_infos, ipc_meta.clone())?;
-
-        let out = &mut self.sink;
-        out.write_all(&SIGNATURE)?;
-        out.write_all(&section_marker)?;
-        let mut pos: u64 = (8 + SECTION_MARKER_LEN) as u64;
-
-        let runinfo_off = pos;
-        let runinfo_len = runinfo_ipc.len() as i64;
-        write_section(out, &runinfo_ipc, &section_marker, &mut pos)?;
-
-        // Stream signal directly to sink, freeing each VBZ blob after writing.
-        // This avoids building a second copy of all compressed signal data in memory.
-        let signal_off = pos;
-        let signal_ipc_bytes = write_signal_streaming(out, &mut self.reads, ipc_meta.clone())?;
-        let signal_len = signal_ipc_bytes as i64;
-        pos += signal_ipc_bytes;
-        let sig_pad = (align8(pos) - pos) as usize;
-        if sig_pad > 0 {
-            out.write_all(&vec![0u8; sig_pad])?;
+    /// VBZ-compress `signal` on the calling thread and send the compressed
+    /// bytes plus metadata to the background writer thread.
+    ///
+    /// Blocks if the channel is full (backpressure keeps peak RSS bounded).
+    pub fn write_read(&mut self, record: &ReadRecord, signal: &[i16]) -> Result<()> {
+        if matches!(self.state, WriterState::Idle(_)) {
+            self.start()?;
         }
-        pos += sig_pad as u64;
-        out.write_all(&section_marker)?;
-        pos += SECTION_MARKER_LEN as u64;
 
-        // Build reads IPC after VBZ blobs have been freed above.
-        let reads_ipc = build_reads_ipc(&self.reads, &self.run_infos, ipc_meta)?;
-        let reads_off = pos;
-        let reads_len = reads_ipc.len() as i64;
-        write_section(out, &reads_ipc, &section_marker, &mut pos)?;
+        let vbz = compress_vbz(signal)?;
+        let vbz_num_samples = signal.len() as u32;
 
-        let contents = [
-            (runinfo_off as i64, runinfo_len, 4i16),
-            (signal_off as i64, signal_len, 1i16),
-            (reads_off as i64, reads_len, 0i16),
-        ];
-        let footer_fb = footer::build_footer(
-            &self.file_identifier,
-            &self.software,
-            &self.pod5_version,
-            &contents,
-        );
-        let footer_len = footer_fb.len() as i64;
-        let padded = align8(footer_len as u64);
-        let footer_pad = (padded - footer_len as u64) as usize;
+        let msg = WriterMsg {
+            read_id: record.read_id,
+            read_number: record.read_number,
+            channel: record.pore.channel,
+            well: record.pore.well,
+            pore_type: record.pore.pore_type.clone(),
+            calib_offset: record.calibration.offset,
+            calib_scale: record.calibration.scale,
+            median_before: record.median_before,
+            end_reason: record.end_reason.reason.as_str(),
+            end_reason_forced: record.end_reason.forced,
+            num_minknow_events: record.num_minknow_events,
+            num_reads_since_mux_change: record.num_reads_since_mux_change,
+            num_samples: record.num_samples,
+            open_pore_level: record.open_pore_level,
+            predicted_scaling_scale: record.predicted_scaling.scale,
+            predicted_scaling_shift: record.predicted_scaling.shift,
+            run_info: Arc::clone(&record.run_info),
+            start_sample: record.start_sample,
+            time_since_mux_change: record.time_since_mux_change,
+            tracked_scaling_scale: record.tracked_scaling.scale,
+            tracked_scaling_shift: record.tracked_scaling.shift,
+            vbz,
+            vbz_num_samples,
+        };
 
-        out.write_all(&FOOTER_MAGIC)?;
-        out.write_all(&footer_fb)?;
-        out.write_all(&vec![0u8; footer_pad])?;
-        out.write_all(&footer_len.to_le_bytes())?;
-        out.write_all(&section_marker)?;
-        out.write_all(&SIGNATURE)?;
+        match &self.state {
+            WriterState::Running { tx, .. } => tx.send(msg).map_err(|_| Error::WriterThreadDied),
+            _ => Err(Error::WriterThreadDied),
+        }
+    }
 
-        Ok(())
+    /// Finalise the file: signal EOF to the writer thread and wait for it to
+    /// finish writing the RunInfo table, Reads table, and footer.
+    pub fn finish(mut self) -> Result<()> {
+        // Handle the empty-file case: start the thread with an empty channel.
+        if matches!(self.state, WriterState::Idle(_)) {
+            self.start()?;
+        }
+        match self.state {
+            WriterState::Running { tx, thread } => {
+                drop(tx); // closing the sender signals EOF to the receiver
+                thread.join().map_err(|_| Error::WriterThreadDied)?
+            }
+            _ => Err(Error::WriterThreadDied),
+        }
     }
 }
 
-// ── File writing helper ───────────────────────────────────────────────────────
+// ── Writer thread ─────────────────────────────────────────────────────────────
 
-/// Write one IPC blob: data, 8-byte-aligned padding, then section marker.
-/// Updates `pos` to point past the section marker.
+/// Core POD5 write loop executed in the background thread.
+///
+/// `FileWriter` lives here as a local variable — the borrow checker is
+/// satisfied because it borrows `out` for only the duration of its scope block,
+/// after which `out` is free to use again.
+fn run_writer_thread(
+    mut out: BufWriter<File>,
+    cfg: WriterConfig,
+    rx: mpsc::Receiver<WriterMsg>,
+) -> Result<()> {
+    let ipc_meta = make_ipc_meta(&cfg);
+    let section_marker = [0u8; SECTION_MARKER_LEN];
+
+    out.write_all(&SIGNATURE)?;
+    out.write_all(&section_marker)?;
+    let mut pos: u64 = (8 + SECTION_MARKER_LEN) as u64;
+
+    // ── Signal section ────────────────────────────────────────────────────────
+    // FileWriter is a stack-local here, not stored in a struct.  This is what
+    // lets us borrow `out` through ByteCounter without fighting the borrow checker.
+    let signal_off = pos;
+    let signal_len: i64;
+    let mut reads: Vec<ReadMeta> = Vec::new();
+    let mut run_infos: Vec<Arc<RunInfo>> = Vec::new();
+    let mut ri_id_to_idx: HashMap<String, usize> = HashMap::new();
+
+    let sig_schema = signal_schema(&ipc_meta);
+    {
+        let opts = IpcWriteOptions::default().with_preserve_dict_id(false);
+        let mut counter = ByteCounter {
+            inner: &mut out,
+            n: 0,
+        };
+        let mut sig_writer = FileWriter::try_new_with_options(&mut counter, &sig_schema, opts)?;
+
+        for msg in rx {
+            let ri_idx = dedup_run_info(&msg.run_info, &mut run_infos, &mut ri_id_to_idx);
+            let batch =
+                build_signal_batch(&msg.read_id, &msg.vbz, msg.vbz_num_samples, &sig_schema)?;
+            sig_writer.write(&batch)?;
+            // msg.vbz drops here — no compressed signal held beyond this point
+
+            reads.push(ReadMeta {
+                read_id: msg.read_id,
+                read_number: msg.read_number,
+                channel: msg.channel,
+                well: msg.well,
+                pore_type: msg.pore_type,
+                calib_offset: msg.calib_offset,
+                calib_scale: msg.calib_scale,
+                median_before: msg.median_before,
+                end_reason: msg.end_reason,
+                end_reason_forced: msg.end_reason_forced,
+                num_minknow_events: msg.num_minknow_events,
+                num_reads_since_mux_change: msg.num_reads_since_mux_change,
+                num_samples: msg.num_samples,
+                open_pore_level: msg.open_pore_level,
+                predicted_scaling_scale: msg.predicted_scaling_scale,
+                predicted_scaling_shift: msg.predicted_scaling_shift,
+                ri_idx,
+                start_sample: msg.start_sample,
+                time_since_mux_change: msg.time_since_mux_change,
+                tracked_scaling_scale: msg.tracked_scaling_scale,
+                tracked_scaling_shift: msg.tracked_scaling_shift,
+            });
+        }
+
+        sig_writer.finish()?;
+        drop(sig_writer); // releases borrow on counter
+        signal_len = counter.n as i64;
+    } // counter drops, releasing borrow on out
+
+    pos += signal_len as u64;
+    write_pad_and_marker(&mut out, &section_marker, &mut pos)?;
+
+    // ── RunInfo section ───────────────────────────────────────────────────────
+    let runinfo_ipc = build_run_info_ipc(&run_infos, ipc_meta.clone())?;
+    let runinfo_off = pos;
+    let runinfo_len = runinfo_ipc.len() as i64;
+    write_section(&mut out, &runinfo_ipc, &section_marker, &mut pos)?;
+
+    // ── Reads section ─────────────────────────────────────────────────────────
+    let reads_ipc = build_reads_ipc(&reads, &run_infos, ipc_meta)?;
+    let reads_off = pos;
+    let reads_len = reads_ipc.len() as i64;
+    write_section(&mut out, &reads_ipc, &section_marker, &mut pos)?;
+
+    write_footer(
+        &mut out,
+        &cfg,
+        &section_marker,
+        signal_off,
+        signal_len,
+        runinfo_off,
+        runinfo_len,
+        reads_off,
+        reads_len,
+    )
+}
+
+// ── Synchronous write path (used by Writer::write_to) ────────────────────────
+
+fn write_pod5_to_sink<W: Write>(
+    out: &mut W,
+    writes: &[WriterRead],
+    cfg: &WriterConfig,
+) -> Result<()> {
+    let ipc_meta = make_ipc_meta(cfg);
+    let section_marker = [0u8; SECTION_MARKER_LEN];
+
+    out.write_all(&SIGNATURE)?;
+    out.write_all(&section_marker)?;
+    let mut pos: u64 = (8 + SECTION_MARKER_LEN) as u64;
+
+    // ── Signal section ────────────────────────────────────────────────────────
+    let signal_off = pos;
+    let signal_len: i64;
+    let mut reads: Vec<ReadMeta> = Vec::with_capacity(writes.len());
+    let mut run_infos: Vec<Arc<RunInfo>> = Vec::new();
+    let mut ri_id_to_idx: HashMap<String, usize> = HashMap::new();
+
+    let sig_schema = signal_schema(&ipc_meta);
+    {
+        let opts = IpcWriteOptions::default().with_preserve_dict_id(false);
+        let mut counter = ByteCounter { inner: out, n: 0 };
+        let mut sig_writer = FileWriter::try_new_with_options(&mut counter, &sig_schema, opts)?;
+
+        for wr in writes {
+            let ri_idx = dedup_run_info(&wr.record.run_info, &mut run_infos, &mut ri_id_to_idx);
+            let vbz = compress_vbz(&wr.signal)?;
+            let vbz_num_samples = wr.signal.len() as u32;
+            let batch = build_signal_batch(&wr.record.read_id, &vbz, vbz_num_samples, &sig_schema)?;
+            sig_writer.write(&batch)?;
+            reads.push(read_meta_from_record(&wr.record, ri_idx));
+        }
+
+        sig_writer.finish()?;
+        drop(sig_writer);
+        signal_len = counter.n as i64;
+    }
+
+    pos += signal_len as u64;
+    write_pad_and_marker(out, &section_marker, &mut pos)?;
+
+    // ── RunInfo section ───────────────────────────────────────────────────────
+    let runinfo_ipc = build_run_info_ipc(&run_infos, ipc_meta.clone())?;
+    let runinfo_off = pos;
+    let runinfo_len = runinfo_ipc.len() as i64;
+    write_section(out, &runinfo_ipc, &section_marker, &mut pos)?;
+
+    // ── Reads section ─────────────────────────────────────────────────────────
+    let reads_ipc = build_reads_ipc(&reads, &run_infos, ipc_meta)?;
+    let reads_off = pos;
+    let reads_len = reads_ipc.len() as i64;
+    write_section(out, &reads_ipc, &section_marker, &mut pos)?;
+
+    write_footer(
+        out,
+        cfg,
+        &section_marker,
+        signal_off,
+        signal_len,
+        runinfo_off,
+        runinfo_len,
+        reads_off,
+        reads_len,
+    )
+}
+
+// ── Shared write helpers ──────────────────────────────────────────────────────
+
+fn make_ipc_meta(cfg: &WriterConfig) -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "MINKNOW:file_identifier".to_string(),
+            cfg.file_identifier.clone(),
+        ),
+        ("MINKNOW:software".to_string(), cfg.software.clone()),
+        ("MINKNOW:pod5_version".to_string(), cfg.pod5_version.clone()),
+    ])
+}
+
+fn signal_schema(meta: &HashMap<String, String>) -> Arc<Schema> {
+    let uuid_meta = HashMap::from([
+        (
+            "ARROW:extension:name".to_string(),
+            "minknow.uuid".to_string(),
+        ),
+        ("ARROW:extension:metadata".to_string(), String::new()),
+    ]);
+    let vbz_meta = HashMap::from([
+        (
+            "ARROW:extension:name".to_string(),
+            "minknow.vbz".to_string(),
+        ),
+        ("ARROW:extension:metadata".to_string(), String::new()),
+    ]);
+    Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("read_id", DataType::FixedSizeBinary(16), false).with_metadata(uuid_meta),
+            Field::new("signal", DataType::LargeBinary, false).with_metadata(vbz_meta),
+            Field::new("samples", DataType::UInt32, false),
+        ],
+        meta.clone(),
+    ))
+}
+
+fn build_signal_batch(
+    read_id: &[u8; 16],
+    vbz: &[u8],
+    vbz_num_samples: u32,
+    schema: &Arc<Schema>,
+) -> Result<RecordBatch> {
+    let mut read_id_col = FixedSizeBinaryBuilder::new(16);
+    read_id_col.append_value(read_id)?;
+    let mut signal_col = LargeBinaryBuilder::new();
+    signal_col.append_value(vbz);
+    let mut samples_col = UInt32Builder::new();
+    samples_col.append_value(vbz_num_samples);
+    Ok(RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(read_id_col.finish()),
+            Arc::new(signal_col.finish()),
+            Arc::new(samples_col.finish()),
+        ],
+    )?)
+}
+
+/// Add `run_info` to `run_infos` if not yet seen; return its index.
+fn dedup_run_info(
+    run_info: &Arc<RunInfo>,
+    run_infos: &mut Vec<Arc<RunInfo>>,
+    ri_id_to_idx: &mut HashMap<String, usize>,
+) -> usize {
+    if let Some(&idx) = ri_id_to_idx.get(run_info.acquisition_id.as_str()) {
+        return idx;
+    }
+    let idx = run_infos.len();
+    ri_id_to_idx.insert(run_info.acquisition_id.clone(), idx);
+    run_infos.push(Arc::clone(run_info));
+    idx
+}
+
+/// Write `ipc` bytes, pad to 8-byte alignment, then write `marker`.
 fn write_section<W: Write>(
     out: &mut W,
     ipc: &[u8],
@@ -325,15 +585,61 @@ fn write_section<W: Write>(
 ) -> Result<()> {
     out.write_all(ipc)?;
     *pos += ipc.len() as u64;
+    write_pad_and_marker(out, marker, pos)
+}
+
+/// Pad `*pos` to 8-byte alignment then write `marker`.
+fn write_pad_and_marker<W: Write>(
+    out: &mut W,
+    marker: &[u8; SECTION_MARKER_LEN],
+    pos: &mut u64,
+) -> Result<()> {
     let pad = (align8(*pos) - *pos) as usize;
-    out.write_all(&vec![0u8; pad])?;
-    *pos += pad as u64;
+    if pad > 0 {
+        out.write_all(&vec![0u8; pad])?;
+        *pos += pad as u64;
+    }
     out.write_all(marker)?;
     *pos += SECTION_MARKER_LEN as u64;
     Ok(())
 }
 
-// ── IPC section builders ──────────────────────────────────────────────────────
+#[allow(clippy::too_many_arguments)]
+fn write_footer<W: Write>(
+    out: &mut W,
+    cfg: &WriterConfig,
+    section_marker: &[u8; SECTION_MARKER_LEN],
+    signal_off: u64,
+    signal_len: i64,
+    runinfo_off: u64,
+    runinfo_len: i64,
+    reads_off: u64,
+    reads_len: i64,
+) -> Result<()> {
+    let contents = [
+        (runinfo_off as i64, runinfo_len, 4i16),
+        (signal_off as i64, signal_len, 1i16),
+        (reads_off as i64, reads_len, 0i16),
+    ];
+    let footer_fb = footer::build_footer(
+        &cfg.file_identifier,
+        &cfg.software,
+        &cfg.pod5_version,
+        &contents,
+    );
+    let footer_len = footer_fb.len() as i64;
+    let footer_pad = (align8(footer_len as u64) - footer_len as u64) as usize;
+
+    out.write_all(&FOOTER_MAGIC)?;
+    out.write_all(&footer_fb)?;
+    if footer_pad > 0 {
+        out.write_all(&vec![0u8; footer_pad])?;
+    }
+    out.write_all(&footer_len.to_le_bytes())?;
+    out.write_all(section_marker)?;
+    out.write_all(&SIGNATURE)?;
+    Ok(())
+}
 
 // ── Byte-counting Write wrapper ───────────────────────────────────────────────
 
@@ -352,6 +658,8 @@ impl<W: Write> Write for ByteCounter<'_, W> {
         self.inner.flush()
     }
 }
+
+// ── IPC section builders ──────────────────────────────────────────────────────
 
 fn write_ipc(schema: &Schema, batches: &[RecordBatch]) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -517,66 +825,6 @@ fn build_run_info_ipc(
     write_ipc(&schema, &[batch])
 }
 
-/// Stream the signal Arrow IPC section directly to `out`, writing one
-/// RecordBatch per read and freeing each `br.vbz` immediately after writing.
-/// Returns the number of IPC bytes written (padding and section marker not included).
-fn write_signal_streaming<W: Write>(
-    out: &mut W,
-    reads: &mut [BufferedRead],
-    meta: HashMap<String, String>,
-) -> Result<u64> {
-    let uuid_meta = HashMap::from([
-        (
-            "ARROW:extension:name".to_string(),
-            "minknow.uuid".to_string(),
-        ),
-        ("ARROW:extension:metadata".to_string(), String::new()),
-    ]);
-    let vbz_meta = HashMap::from([
-        (
-            "ARROW:extension:name".to_string(),
-            "minknow.vbz".to_string(),
-        ),
-        ("ARROW:extension:metadata".to_string(), String::new()),
-    ]);
-    let schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("read_id", DataType::FixedSizeBinary(16), false).with_metadata(uuid_meta),
-            Field::new("signal", DataType::LargeBinary, false).with_metadata(vbz_meta),
-            Field::new("samples", DataType::UInt32, false),
-        ],
-        meta,
-    ));
-
-    let opts = IpcWriteOptions::default().with_preserve_dict_id(false);
-    let mut counter = ByteCounter { inner: out, n: 0 };
-    let mut writer = FileWriter::try_new_with_options(&mut counter, &schema, opts)?;
-
-    for br in reads.iter_mut() {
-        let mut read_id_col = FixedSizeBinaryBuilder::new(16);
-        read_id_col.append_value(br.read_id)?;
-        let mut signal_col = LargeBinaryBuilder::new();
-        signal_col.append_value(&br.vbz);
-        let mut samples_col = UInt32Builder::new();
-        samples_col.append_value(br.vbz_num_samples);
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(read_id_col.finish()),
-                Arc::new(signal_col.finish()),
-                Arc::new(samples_col.finish()),
-            ],
-        )?;
-        writer.write(&batch)?;
-        br.vbz = Vec::new();
-    }
-
-    writer.finish()?;
-    drop(writer);
-    Ok(counter.n)
-}
-
 /// Build a Dictionary<Int16, Utf8> array by deduplicating string values in insertion order.
 fn build_str_dict(values: &[&str]) -> Arc<dyn Array> {
     let mut unique: Vec<&str> = Vec::new();
@@ -607,7 +855,7 @@ fn dict_type() -> DataType {
 }
 
 fn build_reads_ipc(
-    reads: &[BufferedRead],
+    reads: &[ReadMeta],
     run_infos: &[Arc<RunInfo>],
     meta: HashMap<String, String>,
 ) -> Result<Vec<u8>> {
@@ -671,28 +919,28 @@ fn build_reads_ipc(
     let mut end_reason_vals: Vec<&str> = Vec::with_capacity(reads.len());
     let mut run_info_keys: Vec<i16> = Vec::with_capacity(reads.len());
 
-    for (signal_row_idx, br) in reads.iter().enumerate() {
-        read_id_col.append_value(br.read_id)?;
-        read_number_col.append_value(br.read_number);
-        channel_col.append_value(br.channel);
-        well_col.append_value(br.well);
-        pore_type_vals.push(&br.pore_type);
-        calib_offset_col.append_value(br.calib_offset);
-        calib_scale_col.append_value(br.calib_scale);
-        median_before_col.append_value(br.median_before);
-        end_reason_vals.push(br.end_reason);
-        end_reason_forced_col.append_value(br.end_reason_forced);
-        num_events_col.append_value(br.num_minknow_events);
-        num_reads_mux_col.append_value(br.num_reads_since_mux_change);
-        num_samples_col.append_value(br.num_samples);
-        open_pore_col.append_value(br.open_pore_level);
-        pr_scale_col.append_value(br.predicted_scaling_scale);
-        pr_shift_col.append_value(br.predicted_scaling_shift);
-        run_info_keys.push(br.ri_idx as i16);
-        start_col.append_value(br.start_sample);
-        time_mux_col.append_value(br.time_since_mux_change);
-        tr_scale_col.append_value(br.tracked_scaling_scale);
-        tr_shift_col.append_value(br.tracked_scaling_shift);
+    for (signal_row_idx, rm) in reads.iter().enumerate() {
+        read_id_col.append_value(rm.read_id)?;
+        read_number_col.append_value(rm.read_number);
+        channel_col.append_value(rm.channel);
+        well_col.append_value(rm.well);
+        pore_type_vals.push(&rm.pore_type);
+        calib_offset_col.append_value(rm.calib_offset);
+        calib_scale_col.append_value(rm.calib_scale);
+        median_before_col.append_value(rm.median_before);
+        end_reason_vals.push(rm.end_reason);
+        end_reason_forced_col.append_value(rm.end_reason_forced);
+        num_events_col.append_value(rm.num_minknow_events);
+        num_reads_mux_col.append_value(rm.num_reads_since_mux_change);
+        num_samples_col.append_value(rm.num_samples);
+        open_pore_col.append_value(rm.open_pore_level);
+        pr_scale_col.append_value(rm.predicted_scaling_scale);
+        pr_shift_col.append_value(rm.predicted_scaling_shift);
+        run_info_keys.push(rm.ri_idx as i16);
+        start_col.append_value(rm.start_sample);
+        time_mux_col.append_value(rm.time_since_mux_change);
+        tr_scale_col.append_value(rm.tracked_scaling_scale);
+        tr_shift_col.append_value(rm.tracked_scaling_shift);
 
         signal_col.values().append_value(signal_row_idx as u64);
         signal_col.append(true);
@@ -701,7 +949,6 @@ fn build_reads_ipc(
     let pore_type_col = build_str_dict(&pore_type_vals);
     let end_reason_col = build_str_dict(&end_reason_vals);
 
-    // run_info dictionary: keys = ri_idx per read, values = acquisition IDs in table order
     let ri_vals: Vec<&str> = run_infos
         .iter()
         .map(|r| r.acquisition_id.as_str())

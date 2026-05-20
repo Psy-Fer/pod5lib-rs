@@ -58,4 +58,8 @@ pub enum Error {
     /// RunInfo table.
     #[error("run_info column references unknown acquisition_id: '{0}'")]
     MissingRunInfo(String),
+
+    /// The background writer thread exited before the file was complete.
+    #[error("writer thread exited unexpectedly")]
+    WriterThreadDied,
 }
