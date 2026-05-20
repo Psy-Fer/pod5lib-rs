@@ -1,4 +1,4 @@
-//! Performance benchmark: sequential scan and random access by read ID.
+//! Performance benchmark: sequential scan, random access, and streaming write.
 //!
 //! Outputs a single JSON object to stdout; progress/warnings go to stderr.
 //! Designed to be driven by `tests/test_bench.py`.
@@ -12,10 +12,16 @@
 //!       Read UUID strings from stdin (one per line), look up each with
 //!       get_read_by_id(), decompress pA signal.
 //!
+//!   write  <file.pod5>
+//!       Read every read from <file.pod5>, write each to a temp file using
+//!       StreamingWriter (VBZ-compresses on the fly).  Measures end-to-end
+//!       throughput including source decompression and output compression.
+//!
 //!   cargo run --example bench_pod5 --release --quiet -- sequential file.pod5
 //!   printf "id1\nid2\n" | cargo run --example bench_pod5 --release --quiet -- random file.pod5
+//!   cargo run --example bench_pod5 --release --quiet -- write file.pod5
 
-use pod5::Reader;
+use pod5::{Reader, StreamingWriter};
 use serde::Serialize;
 use std::io::{self, BufRead};
 use std::time::Instant;
@@ -29,6 +35,9 @@ struct BenchResult {
     /// Populated only in sequential mode — the caller uses these to build the random list.
     #[serde(skip_serializing_if = "Option::is_none")]
     read_ids: Option<Vec<String>>,
+    /// Populated only in write mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_written: Option<u64>,
 }
 
 /// Peak RSS (kB) from /proc/self/status VmHWM (high-water mark).
@@ -57,6 +66,7 @@ fn main() {
     let result = match mode {
         "sequential" => run_sequential(path),
         "random" => run_random(path),
+        "write" => run_write(path),
         _ => {
             eprintln!("unknown mode: {mode}");
             std::process::exit(1);
@@ -93,6 +103,42 @@ fn run_sequential(path: &str) -> BenchResult {
         wall_ms: t0.elapsed().as_secs_f64() * 1000.0,
         peak_rss_kb: peak_rss_kb(),
         read_ids: Some(read_ids),
+        bytes_written: None,
+    }
+}
+
+fn run_write(path: &str) -> BenchResult {
+    let out = std::env::temp_dir().join("bench_pod5_out.pod5");
+    let reader = Reader::open(path).expect("open failed");
+    let total = reader.len();
+    eprintln!(
+        "bench_pod5 write: {total} reads in {path} → {}",
+        out.display()
+    );
+
+    let t0 = Instant::now();
+    let mut writer = StreamingWriter::create(out.to_str().unwrap()).expect("create writer failed");
+    writer.file_identifier = reader.file_identifier().to_string();
+
+    let mut n = 0usize;
+    for (i, read) in reader.reads_iter().enumerate() {
+        let signal = read.signal().expect("signal failed");
+        writer.write_read(read, &signal).expect("write_read failed");
+        n += 1;
+        if i > 0 && i % 1000 == 0 {
+            eprintln!("  ... {i}/{total}");
+        }
+    }
+    writer.finish().expect("finish failed");
+
+    let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    BenchResult {
+        mode: "write".into(),
+        n_reads: n,
+        wall_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        peak_rss_kb: peak_rss_kb(),
+        read_ids: None,
+        bytes_written: Some(bytes),
     }
 }
 
@@ -133,5 +179,6 @@ fn run_random(path: &str) -> BenchResult {
         wall_ms: t0.elapsed().as_secs_f64() * 1000.0,
         peak_rss_kb: peak_rss_kb(),
         read_ids: None,
+        bytes_written: None,
     }
 }

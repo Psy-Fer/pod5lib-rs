@@ -1,11 +1,11 @@
 /// High-level POD5 file reader — public entry point.
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::footer::{self, ContentType};
+use crate::footer::{self, ContentType, Footer};
 use crate::format::{
     FOOTER_LEN_FIELD_FROM_END, FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8,
 };
@@ -17,8 +17,9 @@ use crate::{Error, Result};
 
 /// Open and read a POD5 file.
 ///
-/// Read metadata is loaded eagerly on `open`; signal data is decompressed
-/// lazily when [`ReadRecord::signal`] / [`ReadRecord::signal_pa`] is called.
+/// Read metadata (Reads + RunInfo tables) is loaded eagerly on `open`; signal data
+/// is decompressed lazily when [`ReadRecord::signal`] / [`ReadRecord::signal_pa`] is
+/// called, reading directly from the file.
 ///
 /// ```no_run
 /// use pod5::Reader;
@@ -46,16 +47,24 @@ pub struct Reader {
     software: String,
 }
 
-impl Reader {
-    /// Open a POD5 file at `path` and load its tables.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut br = BufReader::new(file);
-        Self::from_reader(&mut br)
-    }
+// ── Private helpers ───────────────────────────────────────────────────────────
 
-    /// Build a `Reader` from any `Read + Seek` source (useful for testing).
-    pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self> {
+/// Partially-parsed result of reading the POD5 container structure.
+/// Does NOT include the signal table; callers build that separately.
+struct ParsedTables {
+    footer: Footer,
+    run_info_batches: Vec<arrow::record_batch::RecordBatch>,
+    reads_batches: Vec<arrow::record_batch::RecordBatch>,
+    signal_off: u64,
+    signal_len: u64,
+}
+
+impl Reader {
+    /// Parse the POD5 container from `reader`: verify signatures, locate the FlatBuffers
+    /// footer, then load the RunInfo and Reads Arrow IPC sections into memory.
+    /// Returns the parsed batches and the byte range of the Signal section so callers
+    /// can build the signal table lazily or eagerly.
+    fn parse_tables<R: Read + Seek>(reader: &mut R) -> Result<ParsedTables> {
         // ── 1. Verify opening signature ───────────────────────────────────
         let mut sig = [0u8; 8];
         reader.read_exact(&mut sig)?;
@@ -126,17 +135,12 @@ impl Reader {
         let (runinfo_off, runinfo_len) =
             find(ContentType::RunInfoTable).ok_or(Error::MissingTable("RunInfoTable"))?;
 
-        // ── 6. Load each Arrow IPC section ────────────────────────────────
+        // ── 6. Load RunInfo and Reads Arrow IPC sections ──────────────────
         let run_info_batches = tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
-        let signal_batches = tables::read_ipc_section(reader, signal_off, signal_len)?;
         let reads_batches = tables::read_ipc_section(reader, reads_off, reads_len)?;
 
-        // Cross-validate MINKNOW:file_identifier between footer and each table schema.
-        for (table_name, batches) in [
-            ("RunInfo", &run_info_batches),
-            ("Signal", &signal_batches),
-            ("Reads", &reads_batches),
-        ] {
+        // Cross-validate MINKNOW:file_identifier between footer and RunInfo/Reads schemas.
+        for (table_name, batches) in [("RunInfo", &run_info_batches), ("Reads", &reads_batches)] {
             if let Some(batch) = batches.first()
                 && let Some(schema_id) = batch.schema().metadata().get("MINKNOW:file_identifier")
                 && schema_id != &footer.file_identifier
@@ -149,9 +153,19 @@ impl Reader {
             }
         }
 
-        let run_infos = tables::parse_run_info_batches(&run_info_batches)?;
-        let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
-        let reads = tables::parse_reads_batches(&reads_batches, &run_infos, signal_table)?;
+        Ok(ParsedTables {
+            footer,
+            run_info_batches,
+            reads_batches,
+            signal_off,
+            signal_len,
+        })
+    }
+
+    /// Assemble a `Reader` from parsed table batches and a pre-built signal table.
+    fn finish(pt: ParsedTables, signal_table: Arc<crate::signal::SignalTable>) -> Result<Self> {
+        let run_infos = tables::parse_run_info_batches(&pt.run_info_batches)?;
+        let reads = tables::parse_reads_batches(&pt.reads_batches, &run_infos, signal_table)?;
 
         let reads_index: HashMap<[u8; 16], usize> = reads
             .iter()
@@ -163,10 +177,51 @@ impl Reader {
             reads,
             reads_index,
             run_infos,
-            pod5_version: footer.pod5_version,
-            file_identifier: footer.file_identifier,
-            software: footer.software,
+            pod5_version: pt.footer.pod5_version,
+            file_identifier: pt.footer.file_identifier,
+            software: pt.footer.software,
         })
+    }
+
+    /// Open a POD5 file at `path`.
+    ///
+    /// Loads the Reads and RunInfo tables eagerly; signal blobs are read from the
+    /// file on demand when `ReadRecord::signal` / `ReadRecord::signal_pa` is called.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        let pt = Self::parse_tables(&mut file)?;
+        let (signal_off, signal_len) = (pt.signal_off, pt.signal_len);
+        let file = Arc::new(Mutex::new(file));
+        let signal_table = Arc::new(tables::parse_signal_section_lazy(
+            Arc::clone(&file),
+            signal_off,
+            signal_len,
+        )?);
+        Self::finish(pt, signal_table)
+    }
+
+    /// Build a `Reader` from any `Read + Seek` source (useful for testing).
+    ///
+    /// Loads all three tables (Reads, RunInfo, Signal) eagerly into memory.
+    pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self> {
+        let pt = Self::parse_tables(reader)?;
+        let signal_batches = tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
+
+        // Cross-validate Signal table file_identifier for the eager path.
+        if let Some(batch) = signal_batches.first()
+            && let Some(schema_id) = batch.schema().metadata().get("MINKNOW:file_identifier")
+            && schema_id != &pt.footer.file_identifier
+        {
+            return Err(Error::FileIdentifierMismatch(
+                "Signal".to_string(),
+                schema_id.clone(),
+                pt.footer.file_identifier.clone(),
+            ));
+        }
+
+        let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
+        Self::finish(pt, signal_table)
     }
 
     // ── Public accessors ──────────────────────────────────────────────────

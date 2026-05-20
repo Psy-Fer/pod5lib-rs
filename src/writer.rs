@@ -257,8 +257,6 @@ impl<W: Write> StreamingWriter<W> {
         ]);
 
         let runinfo_ipc = build_run_info_ipc(&self.run_infos, ipc_meta.clone())?;
-        let signal_ipc = build_signal_ipc(&self.reads, ipc_meta.clone())?;
-        let reads_ipc = build_reads_ipc(&self.reads, &self.run_infos, ipc_meta)?;
 
         let out = &mut self.sink;
         out.write_all(&SIGNATURE)?;
@@ -269,10 +267,22 @@ impl<W: Write> StreamingWriter<W> {
         let runinfo_len = runinfo_ipc.len() as i64;
         write_section(out, &runinfo_ipc, &section_marker, &mut pos)?;
 
+        // Stream signal directly to sink, freeing each VBZ blob after writing.
+        // This avoids building a second copy of all compressed signal data in memory.
         let signal_off = pos;
-        let signal_len = signal_ipc.len() as i64;
-        write_section(out, &signal_ipc, &section_marker, &mut pos)?;
+        let signal_ipc_bytes = write_signal_streaming(out, &mut self.reads, ipc_meta.clone())?;
+        let signal_len = signal_ipc_bytes as i64;
+        pos += signal_ipc_bytes;
+        let sig_pad = (align8(pos) - pos) as usize;
+        if sig_pad > 0 {
+            out.write_all(&vec![0u8; sig_pad])?;
+        }
+        pos += sig_pad as u64;
+        out.write_all(&section_marker)?;
+        pos += SECTION_MARKER_LEN as u64;
 
+        // Build reads IPC after VBZ blobs have been freed above.
+        let reads_ipc = build_reads_ipc(&self.reads, &self.run_infos, ipc_meta)?;
         let reads_off = pos;
         let reads_len = reads_ipc.len() as i64;
         write_section(out, &reads_ipc, &section_marker, &mut pos)?;
@@ -324,6 +334,24 @@ fn write_section<W: Write>(
 }
 
 // ── IPC section builders ──────────────────────────────────────────────────────
+
+// ── Byte-counting Write wrapper ───────────────────────────────────────────────
+
+struct ByteCounter<'a, W: Write> {
+    inner: &'a mut W,
+    n: u64,
+}
+
+impl<W: Write> Write for ByteCounter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let k = self.inner.write(buf)?;
+        self.n += k as u64;
+        Ok(k)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 fn write_ipc(schema: &Schema, batches: &[RecordBatch]) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -489,7 +517,14 @@ fn build_run_info_ipc(
     write_ipc(&schema, &[batch])
 }
 
-fn build_signal_ipc(reads: &[BufferedRead], meta: HashMap<String, String>) -> Result<Vec<u8>> {
+/// Stream the signal Arrow IPC section directly to `out`, writing one
+/// RecordBatch per read and freeing each `br.vbz` immediately after writing.
+/// Returns the number of IPC bytes written (padding and section marker not included).
+fn write_signal_streaming<W: Write>(
+    out: &mut W,
+    reads: &mut [BufferedRead],
+    meta: HashMap<String, String>,
+) -> Result<u64> {
     let uuid_meta = HashMap::from([
         (
             "ARROW:extension:name".to_string(),
@@ -513,26 +548,33 @@ fn build_signal_ipc(reads: &[BufferedRead], meta: HashMap<String, String>) -> Re
         meta,
     ));
 
-    let mut read_id_col = FixedSizeBinaryBuilder::new(16);
-    let mut signal_col = LargeBinaryBuilder::new();
-    let mut samples_col = UInt32Builder::new();
+    let opts = IpcWriteOptions::default().with_preserve_dict_id(false);
+    let mut counter = ByteCounter { inner: out, n: 0 };
+    let mut writer = FileWriter::try_new_with_options(&mut counter, &schema, opts)?;
 
-    for br in reads {
+    for br in reads.iter_mut() {
+        let mut read_id_col = FixedSizeBinaryBuilder::new(16);
         read_id_col.append_value(br.read_id)?;
+        let mut signal_col = LargeBinaryBuilder::new();
         signal_col.append_value(&br.vbz);
+        let mut samples_col = UInt32Builder::new();
         samples_col.append_value(br.vbz_num_samples);
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(read_id_col.finish()),
+                Arc::new(signal_col.finish()),
+                Arc::new(samples_col.finish()),
+            ],
+        )?;
+        writer.write(&batch)?;
+        br.vbz = Vec::new();
     }
 
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(read_id_col.finish()),
-            Arc::new(signal_col.finish()),
-            Arc::new(samples_col.finish()),
-        ],
-    )?;
-
-    write_ipc(&schema, &[batch])
+    writer.finish()?;
+    drop(writer);
+    Ok(counter.n)
 }
 
 /// Build a Dictionary<Int16, Utf8> array by deduplicating string values in insertion order.

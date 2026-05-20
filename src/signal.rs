@@ -1,4 +1,4 @@
-/// VBZ signal decompression and the in-memory signal table.
+/// VBZ signal decompression and the signal table (eager or lazy).
 ///
 /// VBZ compression pipeline (encoding order):
 ///   int16 ADC samples
@@ -9,6 +9,10 @@
 ///
 /// On-disk blob layout:
 ///   [zstd-compressed SVB stream...]  (no separate length header; Arrow `samples` column carries N)
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
+
 use arrow::array::{Array, Int16Array, LargeBinaryArray, LargeListArray};
 use arrow::record_batch::RecordBatch;
 
@@ -16,20 +20,43 @@ use crate::{Error, Result};
 
 // ── Signal table ─────────────────────────────────────────────────────────────
 
-/// In-memory signal store.
+/// Signal store — either lazy (file-backed, reads signal on demand) or eager (in-memory).
 ///
-/// Holds Arrow `RecordBatch` objects from the Signal IPC section — no byte copying.
-/// Compressed blobs are borrowed directly from Arrow's `Arc`-backed buffers at
-/// decompression time.
+/// Signal data is decompressed lazily when `samples_for_rows` is called; opening a file
+/// only loads metadata (Reads + RunInfo tables).
 #[derive(Debug)]
-pub(crate) struct SignalTable {
-    /// Arrow IPC batches kept alive so we can borrow signal bytes from them.
-    pub(crate) batches: Vec<RecordBatch>,
-    /// One entry per signal row in the file (across all batches).
-    pub(crate) index: Vec<SignalRowRef>,
+pub(crate) enum SignalTable {
+    /// File-backed lazy variant: signal blobs are read from disk on demand.
+    Lazy {
+        file: Arc<Mutex<File>>,
+        rows: Vec<LazySignalRow>,
+    },
+    /// In-memory eager variant: Arrow IPC batches kept alive for zero-copy borrow.
+    Eager {
+        /// Arrow IPC batches kept alive so we can borrow signal bytes from them.
+        batches: Vec<RecordBatch>,
+        /// One entry per signal row in the file (across all batches).
+        index: Vec<SignalRowRef>,
+    },
 }
 
-/// Lightweight pointer into one row of one Arrow batch.
+/// One row in the lazy signal table.
+#[derive(Debug)]
+pub(crate) enum LazySignalRow {
+    /// VBZ-compressed blob stored at a specific file position.
+    Compressed {
+        /// Absolute byte position of the compressed blob within the .pod5 file.
+        file_offset: u64,
+        /// Length of the compressed blob in bytes.
+        compressed_len: u32,
+        /// Number of ADC samples after decompression.
+        num_samples: u32,
+    },
+    /// Eagerly materialized uncompressed samples (legacy LargeList<Int16> format).
+    Uncompressed(Box<[i16]>),
+}
+
+/// Lightweight pointer into one row of one Arrow batch (used by Eager variant).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SignalRowRef {
     pub batch_idx: u32,
@@ -41,52 +68,94 @@ pub(crate) struct SignalRowRef {
 impl SignalTable {
     /// Decompress and concatenate signal rows identified by `indices`.
     pub fn samples_for_rows(&self, indices: &[u64]) -> Result<Vec<i16>> {
-        let total: usize = indices
-            .iter()
-            .map(|&i| {
-                self.index
-                    .get(i as usize)
-                    .map_or(0, |r| r.num_samples as usize)
-            })
-            .sum();
-        let mut out = Vec::with_capacity(total);
+        match self {
+            SignalTable::Lazy { file, rows } => {
+                let total: usize = indices
+                    .iter()
+                    .map(|&i| match rows.get(i as usize) {
+                        Some(LazySignalRow::Compressed { num_samples, .. }) => {
+                            *num_samples as usize
+                        }
+                        Some(LazySignalRow::Uncompressed(s)) => s.len(),
+                        None => 0,
+                    })
+                    .sum();
+                let mut out = Vec::with_capacity(total);
 
-        for &idx in indices {
-            let row = self
-                .index
-                .get(idx as usize)
-                .ok_or(Error::SignalRowOutOfRange(idx, self.index.len()))?;
+                let mut guard = file
+                    .lock()
+                    .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
 
-            let batch = &self.batches[row.batch_idx as usize];
-            let col = batch
-                .column_by_name("signal")
-                .ok_or_else(|| Error::MissingColumn("signal".into()))?;
-            let i = row.row_in_batch as usize;
+                for &idx in indices {
+                    let row = rows
+                        .get(idx as usize)
+                        .ok_or(Error::SignalRowOutOfRange(idx, rows.len()))?;
 
-            if row.compressed {
-                let arr = col
-                    .as_any()
-                    .downcast_ref::<LargeBinaryArray>()
-                    .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
-                // arr.value(i) is a &[u8] borrowed from Arrow's Arc-backed buffer — no copy.
-                let mut chunk = decompress_vbz(arr.value(i), row.num_samples as usize)?;
-                out.append(&mut chunk);
-            } else {
-                let list = col
-                    .as_any()
-                    .downcast_ref::<LargeListArray>()
-                    .ok_or_else(|| Error::TypeMismatch("signal (uncompressed list)".into()))?;
-                let arr = list.value(i);
-                let int16 = arr
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .ok_or_else(|| Error::TypeMismatch("signal (uncompressed int16)".into()))?;
-                for j in 0..int16.len() {
-                    out.push(int16.value(j));
+                    match row {
+                        LazySignalRow::Compressed {
+                            file_offset,
+                            compressed_len,
+                            num_samples,
+                        } => {
+                            guard.seek(SeekFrom::Start(*file_offset))?;
+                            let mut blob = vec![0u8; *compressed_len as usize];
+                            guard.read_exact(&mut blob)?;
+                            let mut chunk = decompress_vbz(&blob, *num_samples as usize)?;
+                            out.append(&mut chunk);
+                        }
+                        LazySignalRow::Uncompressed(samples) => {
+                            out.extend_from_slice(samples);
+                        }
+                    }
                 }
+                Ok(out)
+            }
+
+            SignalTable::Eager { batches, index } => {
+                let total: usize = indices
+                    .iter()
+                    .map(|&i| index.get(i as usize).map_or(0, |r| r.num_samples as usize))
+                    .sum();
+                let mut out = Vec::with_capacity(total);
+
+                for &idx in indices {
+                    let row = index
+                        .get(idx as usize)
+                        .ok_or(Error::SignalRowOutOfRange(idx, index.len()))?;
+
+                    let batch = &batches[row.batch_idx as usize];
+                    let col = batch
+                        .column_by_name("signal")
+                        .ok_or_else(|| Error::MissingColumn("signal".into()))?;
+                    let i = row.row_in_batch as usize;
+
+                    if row.compressed {
+                        let arr = col
+                            .as_any()
+                            .downcast_ref::<LargeBinaryArray>()
+                            .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
+                        // arr.value(i) is a &[u8] borrowed from Arrow's Arc-backed buffer — no copy.
+                        let mut chunk = decompress_vbz(arr.value(i), row.num_samples as usize)?;
+                        out.append(&mut chunk);
+                    } else {
+                        let list =
+                            col.as_any()
+                                .downcast_ref::<LargeListArray>()
+                                .ok_or_else(|| {
+                                    Error::TypeMismatch("signal (uncompressed list)".into())
+                                })?;
+                        let arr = list.value(i);
+                        let int16 = arr.as_any().downcast_ref::<Int16Array>().ok_or_else(|| {
+                            Error::TypeMismatch("signal (uncompressed int16)".into())
+                        })?;
+                        for j in 0..int16.len() {
+                            out.push(int16.value(j));
+                        }
+                    }
+                }
+                Ok(out)
             }
         }
-        Ok(out)
     }
 }
 
@@ -236,9 +305,9 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────
 
-    /// Build an uncompressed `SignalTable` from slices of i16 samples.
+    /// Build an uncompressed `SignalTable` (Eager variant) from slices of i16 samples.
     /// Each slice becomes one signal row via a `LargeList<Int16>` Arrow batch.
     fn uncompressed_table(rows: &[&[i16]]) -> SignalTable {
         let item_field = Arc::new(Field::new("item", DataType::Int16, true));
@@ -276,7 +345,7 @@ mod tests {
         )
         .unwrap();
 
-        SignalTable {
+        SignalTable::Eager {
             batches: vec![batch],
             index,
         }
@@ -371,7 +440,7 @@ mod tests {
 
     #[test]
     fn signal_table_row_out_of_range() {
-        let table = SignalTable {
+        let table = SignalTable::Eager {
             batches: vec![],
             index: vec![],
         };
@@ -393,5 +462,37 @@ mod tests {
         // indices [1, 0] → row 1 then row 0
         let result = table.samples_for_rows(&[1, 0]).unwrap();
         assert_eq!(result, vec![3i16, 1i16, 2i16]);
+    }
+
+    #[test]
+    fn lazy_row_out_of_range() {
+        // Build a Lazy SignalTable with no rows using a real temp file.
+        let dir = std::env::temp_dir();
+        let path = dir.join("pod5_signal_test_empty.tmp");
+        std::fs::write(&path, b"\0").unwrap();
+        let f = File::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let table = SignalTable::Lazy {
+            file: Arc::new(Mutex::new(f)),
+            rows: vec![],
+        };
+        let err = table.samples_for_rows(&[0]).unwrap_err();
+        assert!(matches!(err, crate::Error::SignalRowOutOfRange(0, 0)));
+    }
+
+    #[test]
+    fn lazy_uncompressed_row() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("pod5_signal_test_uncomp.tmp");
+        std::fs::write(&path, b"\0").unwrap();
+        let f = File::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let samples: Box<[i16]> = vec![10i16, 20, 30].into_boxed_slice();
+        let table = SignalTable::Lazy {
+            file: Arc::new(Mutex::new(f)),
+            rows: vec![LazySignalRow::Uncompressed(samples)],
+        };
+        let result = table.samples_for_rows(&[0]).unwrap();
+        assert_eq!(result, vec![10i16, 20, 30]);
     }
 }

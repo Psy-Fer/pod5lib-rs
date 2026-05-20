@@ -3,8 +3,9 @@
 /// Each table is a Feather v2 / Arrow IPC File embedded in the POD5 container.
 /// We read the whole section into memory then drive the arrow-ipc FileReader.
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::array::types::Int16Type;
 use arrow::array::{
@@ -18,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::Result;
 use crate::error::Error;
-use crate::signal::{SignalRowRef, SignalTable};
+use crate::signal::{LazySignalRow, SignalRowRef, SignalTable};
 use crate::types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair,
 };
@@ -195,7 +196,224 @@ pub(crate) fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTa
         }
     }
 
-    Ok(SignalTable { batches, index })
+    Ok(SignalTable::Eager { batches, index })
+}
+
+/// Build a lazy `SignalTable` by reading only row metadata from the Arrow IPC section.
+///
+/// Unlike `parse_signal_batches`, this function does NOT load the signal blob data
+/// into memory. It reads the Arrow IPC footer and per-batch message headers to extract
+/// the file offsets and lengths of each VBZ blob, storing them as `LazySignalRow`
+/// entries. Signal bytes are read from `file` on demand when `samples_for_rows` is called.
+///
+/// `section_offset` and `section_len` are the absolute byte position and length of the
+/// Signal IPC section within the .pod5 file (as reported by the FlatBuffers footer).
+pub(crate) fn parse_signal_section_lazy(
+    file: Arc<Mutex<File>>,
+    section_offset: u64,
+    section_len: u64,
+) -> crate::Result<SignalTable> {
+    // ── 1. Read Arrow IPC footer from end of section ──────────────────────────
+    // Arrow IPC file footer layout (last 10 bytes of section):
+    //   [4 bytes] footer_length (i32 LE, unpadded flatbuffer byte count)
+    //   [6 bytes] "ARROW1" magic
+    const ARROW_FOOTER_SUFFIX: usize = 10;
+    const ARROW_MAGIC: &[u8; 6] = b"ARROW1";
+
+    let mut guard = file
+        .lock()
+        .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
+
+    let suffix_pos = section_offset + section_len - ARROW_FOOTER_SUFFIX as u64;
+    guard.seek(SeekFrom::Start(suffix_pos))?;
+    let mut suffix = [0u8; ARROW_FOOTER_SUFFIX];
+    guard.read_exact(&mut suffix)?;
+
+    if &suffix[4..10] != ARROW_MAGIC {
+        return Err(Error::FlatBuffers(
+            "Arrow IPC magic 'ARROW1' not found at end of Signal section".into(),
+        ));
+    }
+
+    let arrow_footer_len = i32::from_le_bytes(suffix[0..4].try_into().unwrap()) as u64;
+    if arrow_footer_len == 0 {
+        // Empty signal table
+        drop(guard);
+        return Ok(SignalTable::Lazy {
+            file,
+            rows: Vec::new(),
+        });
+    }
+
+    let arrow_footer_start =
+        section_offset + section_len - ARROW_FOOTER_SUFFIX as u64 - arrow_footer_len;
+    guard.seek(SeekFrom::Start(arrow_footer_start))?;
+    let mut footer_bytes = vec![0u8; arrow_footer_len as usize];
+    guard.read_exact(&mut footer_bytes)?;
+
+    let arrow_footer = arrow::ipc::root_as_footer(&footer_bytes)
+        .map_err(|e| Error::FlatBuffers(format!("Arrow IPC footer parse error: {e}")))?;
+
+    // ── 2. Determine VBZ vs uncompressed from schema ──────────────────────────
+    // VBZ: field 1 is LargeBinary (type_type != LargeList)
+    // Uncompressed: field 1 is LargeList
+    let is_vbz = arrow_footer
+        .schema()
+        .and_then(|s| s.fields())
+        .map(|fields| {
+            // Signal table schema: field 0 = read_id (FixedSizeBinary), field 1 = signal
+            fields.len() <= 1 || fields.get(1).type_type() != arrow::ipc::Type::LargeList
+        })
+        .unwrap_or(true); // default to VBZ
+
+    // ── 3. Parse each RecordBatch block ───────────────────────────────────────
+    let record_batches = match arrow_footer.recordBatches() {
+        Some(rb) => rb,
+        None => {
+            drop(guard);
+            return Ok(SignalTable::Lazy {
+                file,
+                rows: Vec::new(),
+            });
+        }
+    };
+
+    let mut rows: Vec<LazySignalRow> = Vec::new();
+
+    for block in record_batches {
+        // Arrow IPC block offsets are relative to the section start, NOT absolute.
+        let abs_msg_start = section_offset + block.offset() as u64;
+        let meta_len = block.metaDataLength() as u64;
+        let body_start = abs_msg_start + meta_len;
+
+        // Read the message header (continuation marker + size + flatbuffer)
+        guard.seek(SeekFrom::Start(abs_msg_start))?;
+        let mut meta_bytes = vec![0u8; meta_len as usize];
+        guard.read_exact(&mut meta_bytes)?;
+
+        // Arrow IPC message header layout:
+        //   [4 bytes] continuation marker (0xFFFFFFFF)
+        //   [4 bytes] metadata size (i32 LE)
+        //   [N bytes] flatbuffer message
+        //   [padding] to 8-byte boundary
+        if meta_bytes.len() < 8 {
+            return Err(Error::FlatBuffers(
+                "Arrow IPC message header too short".into(),
+            ));
+        }
+        let msg = arrow::ipc::root_as_message(&meta_bytes[8..])
+            .map_err(|e| Error::FlatBuffers(format!("Arrow IPC message parse error: {e}")))?;
+
+        let rb = msg
+            .header_as_record_batch()
+            .ok_or_else(|| Error::FlatBuffers("Arrow IPC message is not a RecordBatch".into()))?;
+
+        let n_rows = rb.length() as usize;
+        if n_rows == 0 {
+            continue;
+        }
+
+        let buffers = rb
+            .buffers()
+            .ok_or_else(|| Error::FlatBuffers("RecordBatch has no buffers".into()))?;
+
+        if is_vbz {
+            // VBZ (LargeBinary) buffer layout for Signal table schema:
+            //   FixedSizeBinary(16): buffers[0] validity, buffers[1] data
+            //   LargeBinary:         buffers[2] validity, buffers[3] int64 offsets, buffers[4] blob data
+            //   UInt32:              buffers[5] validity, buffers[6] data
+            if buffers.len() < 7 {
+                return Err(Error::FlatBuffers(format!(
+                    "VBZ signal batch has only {} buffers (expected ≥7)",
+                    buffers.len()
+                )));
+            }
+
+            // Read int64 offsets buffer (buffers[3]): (n_rows+1) × 8 bytes
+            let offsets_buf = buffers.get(3);
+            let samples_buf = buffers.get(6);
+            let data_buf = buffers.get(4);
+
+            let offsets_abs = body_start + offsets_buf.offset() as u64;
+            let samples_abs = body_start + samples_buf.offset() as u64;
+            let data_abs = body_start + data_buf.offset() as u64;
+
+            // Read the int64 offsets
+            guard.seek(SeekFrom::Start(offsets_abs))?;
+            let mut offsets_bytes = vec![0u8; (n_rows + 1) * 8];
+            guard.read_exact(&mut offsets_bytes)?;
+            let int64_offsets: Vec<i64> = offsets_bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+
+            // Read the UInt32 num_samples
+            guard.seek(SeekFrom::Start(samples_abs))?;
+            let mut samples_bytes = vec![0u8; n_rows * 4];
+            guard.read_exact(&mut samples_bytes)?;
+            let num_samples_vec: Vec<u32> = samples_bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+
+            for i in 0..n_rows {
+                let file_offset = data_abs + int64_offsets[i] as u64;
+                let compressed_len = (int64_offsets[i + 1] - int64_offsets[i]) as u32;
+                let num_samples = num_samples_vec[i];
+                rows.push(LazySignalRow::Compressed {
+                    file_offset,
+                    compressed_len,
+                    num_samples,
+                });
+            }
+        } else {
+            // Uncompressed (LargeList<Int16>) buffer layout:
+            //   FixedSizeBinary(16): buffers[0] validity, buffers[1] data
+            //   LargeList<Int16>:    buffers[2] validity, buffers[3] list offsets, buffers[4] child validity, buffers[5] child data
+            //   UInt32:              buffers[6] validity, buffers[7] data
+            if buffers.len() < 6 {
+                return Err(Error::FlatBuffers(format!(
+                    "Uncompressed signal batch has only {} buffers (expected ≥6)",
+                    buffers.len()
+                )));
+            }
+
+            let list_offsets_buf = buffers.get(3);
+            let child_data_buf = buffers.get(5);
+
+            let list_offsets_abs = body_start + list_offsets_buf.offset() as u64;
+            let child_data_abs = body_start + child_data_buf.offset() as u64;
+
+            // Read the list int64 offsets
+            guard.seek(SeekFrom::Start(list_offsets_abs))?;
+            let mut offsets_bytes = vec![0u8; (n_rows + 1) * 8];
+            guard.read_exact(&mut offsets_bytes)?;
+            let list_offsets: Vec<i64> = offsets_bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+
+            // Read the child Int16 data (all at once for this batch)
+            let total_samples = list_offsets[n_rows] as usize;
+            guard.seek(SeekFrom::Start(child_data_abs))?;
+            let mut child_bytes = vec![0u8; total_samples * 2];
+            guard.read_exact(&mut child_bytes)?;
+            let child_i16: Vec<i16> = child_bytes
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+
+            for i in 0..n_rows {
+                let start = list_offsets[i] as usize;
+                let end = list_offsets[i + 1] as usize;
+                let samples: Box<[i16]> = child_i16[start..end].to_vec().into_boxed_slice();
+                rows.push(LazySignalRow::Uncompressed(samples));
+            }
+        }
+    }
+
+    drop(guard);
+    Ok(SignalTable::Lazy { file, rows })
 }
 
 // ── Reads table ───────────────────────────────────────────────────────────────
