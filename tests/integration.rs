@@ -24,7 +24,7 @@ fn uuid_to_str_known_value() {
     // Python: str(uuid.UUID(bytes=bytes([1,2,3,4, 5,6, 7,8, 9,10, 11,12,13,14,15,16])))
     // == "01020304-0506-0708-090a-0b0c0d0e0f10"
     let bytes: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-    let s = pod5::uuid_to_str(&bytes);
+    let s = pod5lib::uuid_to_str(&bytes);
     assert_eq!(s, "01020304-0506-0708-090a-0b0c0d0e0f10");
 }
 
@@ -32,7 +32,7 @@ fn uuid_to_str_known_value() {
 fn calibration_to_pa() {
     // Formula: pA = (adc + offset) * scale
     // offset is stored negative (e.g. -224 means subtract 224 from ADC).
-    let cal = pod5::Calibration {
+    let cal = pod5lib::Calibration {
         offset: -224.0,
         scale: 0.1,
     };
@@ -52,7 +52,7 @@ fn open_sample_file() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     assert!(!reader.is_empty(), "expected at least one read");
     assert!(
         !reader.run_infos().is_empty(),
@@ -65,7 +65,7 @@ fn read_fields_present() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     let read = reader.reads().first().expect("no reads");
     // read_id must be non-zero
     assert_ne!(read.read_id, [0u8; 16]);
@@ -79,7 +79,7 @@ fn signal_pa_length_matches() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     let read = reader.reads().first().expect("no reads");
     let pa = read.signal_pa().expect("signal_pa failed");
     assert_eq!(pa.len(), read.num_samples as usize);
@@ -92,7 +92,7 @@ fn run_info_sample_rate_nonzero() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     for ri in reader.run_infos() {
         assert!(ri.sample_rate > 0);
     }
@@ -103,7 +103,7 @@ fn reader_accessors_nonempty() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     assert!(!reader.pod5_version().is_empty());
     assert!(!reader.file_identifier().is_empty());
     assert!(!reader.software().is_empty());
@@ -116,7 +116,7 @@ fn reads_by_id_finds_first_read() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     let first = reader.reads().first().expect("no reads");
     let id = first.read_id_str();
     let found: Vec<_> = reader.reads_by_id(&id).collect();
@@ -129,7 +129,7 @@ fn reads_by_id_not_found() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     let found: Vec<_> = reader
         .reads_by_id("00000000-0000-0000-0000-000000000000")
         .collect();
@@ -141,7 +141,7 @@ fn reads_iter_yields_all_reads() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     let count = reader.reads_iter().count();
     assert_eq!(count, reader.len());
 }
@@ -151,7 +151,7 @@ fn reads_iter_matches_reads_slice() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     for (iter_read, slice_read) in reader.reads_iter().zip(reader.reads()) {
         assert_eq!(iter_read.read_id, slice_read.read_id);
     }
@@ -162,7 +162,7 @@ fn get_read_by_id_finds_every_read() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     for read in reader.reads() {
         let id = read.read_id_str();
         let found = reader
@@ -177,7 +177,7 @@ fn get_read_by_id_not_found() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     assert!(
         reader
             .get_read_by_id("00000000-0000-0000-0000-000000000000")
@@ -190,7 +190,7 @@ fn get_read_by_id_bad_format_returns_none() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let reader = pod5::Reader::open(&path).expect("open failed");
+    let reader = pod5lib::Reader::open(&path).expect("open failed");
     assert!(reader.get_read_by_id("not-a-uuid").is_none());
     assert!(reader.get_read_by_id("").is_none());
     assert!(
@@ -207,10 +207,10 @@ fn writer_round_trip_read_ids() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let src = pod5::Reader::open(&path).expect("open source");
+    let src = pod5lib::Reader::open(&path).expect("open source");
     let n = 3.min(src.len());
 
-    let mut writer = pod5::Writer::new();
+    let mut writer = pod5lib::Writer::new();
     writer.file_identifier = src.file_identifier().to_string();
     writer.pod5_version = src.pod5_version().to_string();
     for read in src.reads_iter().take(n) {
@@ -222,7 +222,7 @@ fn writer_round_trip_read_ids() {
     writer.write_to(&mut buf).expect("write_to failed");
 
     let mut cursor = Cursor::new(buf);
-    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+    let dst = pod5lib::Reader::from_reader(&mut cursor).expect("read back failed");
 
     assert_eq!(dst.len(), n, "read count mismatch");
     for (orig, written) in src.reads_iter().take(n).zip(dst.reads_iter()) {
@@ -239,10 +239,10 @@ fn writer_round_trip_signal() {
     let Some(path) = sample_pod5() else {
         return;
     };
-    let src = pod5::Reader::open(&path).expect("open source");
+    let src = pod5lib::Reader::open(&path).expect("open source");
     let n = 3.min(src.len());
 
-    let mut writer = pod5::Writer::new();
+    let mut writer = pod5lib::Writer::new();
     writer.file_identifier = src.file_identifier().to_string();
     writer.pod5_version = src.pod5_version().to_string();
     let orig_signals: Vec<Vec<i16>> = src
@@ -258,7 +258,7 @@ fn writer_round_trip_signal() {
     writer.write_to(&mut buf).expect("write_to failed");
 
     let mut cursor = Cursor::new(buf);
-    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+    let dst = pod5lib::Reader::from_reader(&mut cursor).expect("read back failed");
 
     for (orig_sig, written) in orig_signals.iter().zip(dst.reads_iter()) {
         let written_sig = written.signal().expect("decompress written");
@@ -268,12 +268,12 @@ fn writer_round_trip_signal() {
 
 #[test]
 fn writer_empty_file() {
-    let writer = pod5::Writer::new();
+    let writer = pod5lib::Writer::new();
     let mut buf = Vec::new();
     writer.write_to(&mut buf).expect("write_to failed");
 
     let mut cursor = Cursor::new(buf);
-    let dst = pod5::Reader::from_reader(&mut cursor).expect("read back failed");
+    let dst = pod5lib::Reader::from_reader(&mut cursor).expect("read back failed");
     assert!(dst.is_empty());
 }
 
@@ -285,9 +285,9 @@ const FOOTER_MAGIC: [u8; 8] = [b'F', b'O', b'O', b'T', b'E', b'R', 0x00, 0x00];
 #[test]
 fn reader_invalid_opening_signature() {
     let mut cursor = Cursor::new(b"WRONGSIG");
-    let err = pod5::Reader::from_reader(&mut cursor).unwrap_err();
+    let err = pod5lib::Reader::from_reader(&mut cursor).unwrap_err();
     assert!(
-        matches!(err, pod5::Error::InvalidSignature),
+        matches!(err, pod5lib::Error::InvalidSignature),
         "expected InvalidSignature, got {err:?}"
     );
 }
@@ -314,9 +314,9 @@ fn build_error_test_buf(marker_a: [u8; 16], marker_b: [u8; 16], magic: [u8; 8]) 
 fn reader_section_marker_mismatch() {
     let buf = build_error_test_buf([0xAA; 16], [0xBB; 16], FOOTER_MAGIC);
     let mut cursor = Cursor::new(buf);
-    let err = pod5::Reader::from_reader(&mut cursor).unwrap_err();
+    let err = pod5lib::Reader::from_reader(&mut cursor).unwrap_err();
     assert!(
-        matches!(err, pod5::Error::InconsistentSectionMarker),
+        matches!(err, pod5lib::Error::InconsistentSectionMarker),
         "expected InconsistentSectionMarker, got {err:?}"
     );
 }
@@ -325,9 +325,9 @@ fn reader_section_marker_mismatch() {
 fn reader_footer_magic_not_found() {
     let buf = build_error_test_buf([0xCC; 16], [0xCC; 16], [0u8; 8]);
     let mut cursor = Cursor::new(buf);
-    let err = pod5::Reader::from_reader(&mut cursor).unwrap_err();
+    let err = pod5lib::Reader::from_reader(&mut cursor).unwrap_err();
     assert!(
-        matches!(err, pod5::Error::FooterMagicNotFound),
+        matches!(err, pod5lib::Error::FooterMagicNotFound),
         "expected FooterMagicNotFound, got {err:?}"
     );
 }

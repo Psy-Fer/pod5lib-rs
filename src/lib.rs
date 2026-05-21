@@ -9,7 +9,7 @@
 //! ## Reading
 //!
 //! ```no_run
-//! use pod5::Reader;
+//! use pod5lib::Reader;
 //!
 //! let reader = Reader::open("sample.pod5").unwrap();
 //! println!("{} reads", reader.len());
@@ -33,7 +33,7 @@
 //! immediately and does not hold decompressed samples beyond each [`StreamingWriter::write_read`] call.
 //!
 //! ```no_run
-//! use pod5::{Reader, StreamingWriter};
+//! use pod5lib::{Reader, StreamingWriter};
 //!
 //! let src = Reader::open("input.pod5").unwrap();
 //! let mut writer = StreamingWriter::create("output.pod5").unwrap();

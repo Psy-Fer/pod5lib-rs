@@ -1,4 +1,4 @@
-# pod5
+# pod5lib
 
 Pure Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/) nanopore sequencing files — Oxford Nanopore Technologies' successor to FAST5.
 
@@ -14,7 +14,7 @@ Pure Rust library for reading and writing [POD5](https://pod5-file-format.readth
 ### Reading
 
 ```rust
-use pod5::Reader;
+use pod5lib::Reader;
 
 let reader = Reader::open("sample.pod5")?;
 println!("{} reads", reader.len());
@@ -34,7 +34,7 @@ if let Some(read) = reader.get_read_by_id("a1b2c3d4-0506-0708-090a-0b0c0d0e0f10"
 ### Writing (buffered)
 
 ```rust
-use pod5::{Reader, Writer};
+use pod5lib::{Reader, Writer};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = Writer::new();
@@ -50,7 +50,7 @@ writer.write_file("output.pod5")?;
 ### Writing (streaming — lower memory use)
 
 ```rust
-use pod5::{Reader, StreamingWriter};
+use pod5lib::{Reader, StreamingWriter};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = StreamingWriter::create("output.pod5")?;
@@ -84,6 +84,21 @@ Signal is compressed with VBZ: delta-encode → zigzag-encode → SVB16 → zstd
 | `arrow` (ipc feature) | Arrow IPC reading and writing |
 | `zstd` | zstd compression/decompression for VBZ signal |
 | `thiserror` | Error derive |
+
+## Acknowledgements
+
+The POD5 format is designed and developed by [Oxford Nanopore Technologies](https://nanoporetech.com/).
+The reference implementation and format specification are available at
+[github.com/nanoporetech/pod5-file-format](https://github.com/nanoporetech/pod5-file-format)
+under the Mozilla Public License v2.0.
+
+`pod5-rs` is an independent clean-room Rust implementation of the format and is not
+affiliated with or endorsed by Oxford Nanopore Technologies.
+
+## License
+
+This project is licensed under the [Mozilla Public License v2.0](LICENSE), consistent
+with the ONT reference implementation.
 
 ## Development
 

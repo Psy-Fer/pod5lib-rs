@@ -21,7 +21,7 @@
 //!   printf "id1\nid2\n" | cargo run --example bench_pod5 --release --quiet -- random file.pod5
 //!   cargo run --example bench_pod5 --release --quiet -- write file.pod5
 
-use pod5::{Reader, StreamingWriter};
+use pod5lib::{Reader, StreamingWriter};
 use serde::Serialize;
 use std::io::{self, BufRead};
 use std::time::Instant;

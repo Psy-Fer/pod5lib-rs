@@ -136,7 +136,7 @@ enum WriterState {
 /// reads in memory simultaneously is undesirable.
 ///
 /// ```no_run
-/// use pod5::{Reader, Writer};
+/// use pod5lib::{Reader, Writer};
 ///
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = Writer::new();
@@ -212,7 +212,7 @@ impl Writer {
 /// near-constant regardless of file size.
 ///
 /// ```no_run
-/// use pod5::{Reader, StreamingWriter};
+/// use pod5lib::{Reader, StreamingWriter};
 ///
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = StreamingWriter::create("output.pod5").unwrap();

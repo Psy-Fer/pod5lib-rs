@@ -5,7 +5,7 @@
 //!
 //!   cargo run --example dump_pod5 --quiet -- <file.pod5>
 
-use pod5::Reader;
+use pod5lib::Reader;
 use serde::Serialize;
 use std::collections::BTreeMap;
 

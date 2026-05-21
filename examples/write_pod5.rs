@@ -7,7 +7,7 @@
 ///           N   = 10
 use std::path::PathBuf;
 
-use pod5::{Reader, Writer};
+use pod5lib::{Reader, Writer};
 
 fn find_test_file() -> Option<PathBuf> {
     for candidate in &["tests/data/sample.pod5", "examples/small.pod5"] {

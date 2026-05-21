@@ -22,7 +22,7 @@ use crate::{Error, Result};
 /// called, reading directly from the file.
 ///
 /// ```no_run
-/// use pod5::Reader;
+/// use pod5lib::Reader;
 ///
 /// let reader = Reader::open("sample.pod5").unwrap();
 ///
