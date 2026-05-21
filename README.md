@@ -92,7 +92,7 @@ The reference implementation and format specification are available at
 [github.com/nanoporetech/pod5-file-format](https://github.com/nanoporetech/pod5-file-format)
 under the Mozilla Public License v2.0.
 
-`pod5-rs` is an independent clean-room Rust implementation of the format and is not
+`pod5lib-rs` is an independent clean-room Rust implementation of the format and is not
 affiliated with or endorsed by Oxford Nanopore Technologies.
 
 ## License

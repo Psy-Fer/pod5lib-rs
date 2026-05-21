@@ -17,7 +17,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-pod5 = { git = "https://github.com/Psy-Fer/pod5-rs" }
+pod5 = { git = "https://github.com/Psy-Fer/pod5lib-rs" }
 ```
 
 ## Quick example

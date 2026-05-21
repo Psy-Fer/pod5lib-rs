@@ -6,4 +6,4 @@ src = "src"
 language = "en"
 
 [output.html]
-git-repository-url = "https://github.com/Psy-Fer/pod5-rs"
+git-repository-url = "https://github.com/Psy-Fer/pod5lib-rs"
