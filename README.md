@@ -65,6 +65,17 @@ writer.finish()?;
 
 `StreamingWriter` VBZ-compresses each read's signal on `write_read` and releases it immediately, rather than accumulating raw samples for the whole file. Prefer it for large files.
 
+## Performance
+
+Benchmarked on a 4,282-read / 733 MB POD5 file (sequential scan, `--release`), compared against the Python `pod5` library.
+
+| Operation | Rust | Python | Ratio |
+|---|---|---|---|
+| Read (sequential) | ~1,360 ms, **31 MB** RSS | ~1,370 ms, 797 MB RSS | speed parity, **26× less RAM** |
+| Write (copy) | ~2,240 ms, **305 MB** RSS | ~4,035 ms, 885 MB RSS | **1.8× faster**, **3× less RAM** |
+
+`StreamingWriter` uses rayon to compress signal in parallel batches (`DEFAULT_SIGNAL_BATCH_SIZE = 64`) before handing compressed blobs to a background writer thread, keeping peak RSS bounded regardless of file size.
+
 ## POD5 format
 
 POD5 files contain three [Arrow IPC](https://arrow.apache.org/docs/format/IPC.html) tables embedded in a binary container with a [FlatBuffers](https://flatbuffers.dev/) footer:

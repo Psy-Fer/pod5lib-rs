@@ -163,51 +163,14 @@ impl SignalTable {
 
 /// Compress raw ADC i16 samples to a VBZ blob.
 ///
-/// Pipeline (reverse of decompression): delta → zigzag → SVB16 → zstd
+/// Pipeline: delta → zigzag → SVB16 → zstd
 pub(crate) fn compress_vbz(samples: &[i16]) -> crate::Result<Vec<u8>> {
     if samples.is_empty() {
         return Ok(Vec::new());
     }
-
-    let mut prev: i16 = 0;
-    let zigzag: Vec<u16> = samples
-        .iter()
-        .map(|&s| {
-            let delta = s.wrapping_sub(prev);
-            prev = s;
-            ((delta << 1) ^ (delta >> 15)) as u16
-        })
-        .collect();
-
-    let svb = encode_svb16(&zigzag);
-    zstd::bulk::compress(&svb, 0).map_err(|e| crate::Error::Vbz(format!("zstd compress: {e}")))
-}
-
-/// Encode u16 values as SVB16 (1-bit-per-value control stream, LSB-first).
-///
-/// bit=0 → write 1 data byte (value fits in u8)
-/// bit=1 → write 2 data bytes LE (value requires u16)
-pub(crate) fn encode_svb16(values: &[u16]) -> Vec<u8> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let n = values.len();
-    let ctrl_len = n.div_ceil(8);
-    let mut ctrl = vec![0u8; ctrl_len];
-    let mut data: Vec<u8> = Vec::with_capacity(n * 2);
-
-    for (i, &v) in values.iter().enumerate() {
-        if v <= 0xFF {
-            data.push(v as u8);
-        } else {
-            ctrl[i / 8] |= 1 << (i % 8);
-            data.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-
-    let mut out = ctrl;
-    out.extend_from_slice(&data);
-    out
+    let mut svb_buf = Vec::new();
+    svb::encode_vbz_into(samples, &mut svb_buf);
+    zstd::bulk::compress(&svb_buf, 0).map_err(|e| crate::Error::Vbz(format!("zstd compress: {e}")))
 }
 
 // ── VBZ decompression ────────────────────────────────────────────────────────
@@ -220,80 +183,13 @@ pub(crate) fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>
     if num_samples == 0 {
         return Ok(Vec::new());
     }
-
-    // SVB16 output: ceil(N/8) control bytes + at most N*2 data bytes
     let svb_cap = num_samples / 8 + 1 + num_samples * 2;
-
     let svb_data =
         zstd::bulk::decompress(data, svb_cap).map_err(|e| Error::Vbz(format!("zstd: {e}")))?;
-
-    let zigzag = decode_svb16(&svb_data, num_samples)?;
-
-    let mut samples = Vec::with_capacity(num_samples);
-    let mut prev: i16 = 0;
-    for z in zigzag {
-        let delta = zigzag_decode(z);
-        prev = prev.wrapping_add(delta);
-        samples.push(prev);
-    }
-
-    samples.truncate(num_samples);
-    Ok(samples)
-}
-
-// ── SVB16 ────────────────────────────────────────────────────────────────────
-
-/// Decode a StreamVByte-16 stream of `n` unsigned 16-bit integers.
-///
-/// VBZ uses **1 bit per value** packed LSB-first into control bytes (8 per byte):
-///   bit=0 → next 1 byte  encodes the value as u8
-///   bit=1 → next 2 bytes encode the value as u16 LE
-///
-/// Layout: `ceil(n/8)` control bytes, followed by the variable-length data bytes.
-fn decode_svb16(data: &[u8], n: usize) -> Result<Vec<u16>> {
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    let ctrl_len = n.div_ceil(8);
-    if data.len() < ctrl_len {
-        return Err(Error::Vbz("SVB16: data shorter than control stream".into()));
-    }
-
-    let ctrl = &data[..ctrl_len];
-    let mut pos = ctrl_len;
-    let mut out = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let bit = (ctrl[i / 8] >> (i % 8)) & 1;
-        let val = if bit == 0 {
-            if pos >= data.len() {
-                return Err(Error::Vbz("SVB16: data overrun (1-byte)".into()));
-            }
-            let v = data[pos] as u16;
-            pos += 1;
-            v
-        } else {
-            if pos + 1 >= data.len() {
-                return Err(Error::Vbz("SVB16: data overrun (2-byte)".into()));
-            }
-            let v = u16::from_le_bytes([data[pos], data[pos + 1]]);
-            pos += 2;
-            v
-        };
-        out.push(val);
-    }
-
+    let mut out = Vec::with_capacity(num_samples);
+    svb::decode_vbz_fused_into(&svb_data, num_samples, &mut out)
+        .map_err(|e| Error::Vbz(format!("fused decode: {e}")))?;
     Ok(out)
-}
-
-// ── Zigzag ───────────────────────────────────────────────────────────────────
-
-/// Decode a zigzag-encoded u16 back to a signed i16 delta.
-///
-/// Encoding: `(x << 1) ^ (x >> 15)`  — maps 0→0, -1→1, 1→2, -2→3, …
-#[inline]
-fn zigzag_decode(n: u16) -> i16 {
-    ((n >> 1) as i16) ^ (-((n & 1) as i16))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -304,6 +200,7 @@ mod tests {
     use arrow::array::{ArrayRef, Int16Builder, LargeListBuilder, UInt32Builder};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+    use svb::u16::Svb16;
 
     // ── Helpers ───────────────────────────────────────────────────────
 
@@ -351,56 +248,52 @@ mod tests {
         }
     }
 
-    // ── Zigzag ────────────────────────────────────────────────────────────
+    // ── Zigzag (via svb crate) ────────────────────────────────────────────
 
     #[test]
     fn zigzag_round_trip() {
         for v in [-32768i16, -1, 0, 1, 127, 32767] {
-            let encoded = ((v << 1) ^ (v >> 15)) as u16;
-            assert_eq!(zigzag_decode(encoded), v, "round-trip failed for {v}");
+            let enc = svb::zigzag::encode::<i16>(&[v]);
+            let dec = svb::zigzag::decode::<i16>(&enc);
+            assert_eq!(dec[0], v, "round-trip failed for {v}");
         }
     }
 
-    // ── SVB16 ────────────────────────────────────────────────────────────
+    // ── SVB16 (via svb crate) — verifies ONT wire-format compatibility ────
 
     #[test]
     fn svb16_single_byte_values() {
-        // 4 values, all fit in 1 byte → bits = 00000000 → ctrl = 0x00
+        // 4 values all ≤255 → ctrl byte 0x00, then 4 data bytes
         let data: Vec<u8> = vec![0x00, 0, 1, 2, 3];
-        let out = decode_svb16(&data, 4).unwrap();
+        let out = Svb16.decode(&data, 4).unwrap();
         assert_eq!(out, vec![0u16, 1, 2, 3]);
     }
 
     #[test]
     fn svb16_two_byte_values() {
-        // 1 value, needs 2 bytes → bit=1 → ctrl byte = 0b00000001 = 0x01
-        let data: Vec<u8> = vec![0x01, 0x00, 0x01]; // ctrl, then 256 LE
-        let out = decode_svb16(&data, 1).unwrap();
+        // 1 value that needs 2 bytes → ctrl bit=1 → ctrl byte 0x01, data = 256 LE
+        let data: Vec<u8> = vec![0x01, 0x00, 0x01];
+        let out = Svb16.decode(&data, 1).unwrap();
         assert_eq!(out, vec![256u16]);
     }
 
     #[test]
     fn svb16_mixed() {
-        // val=5 (1 byte, bit=0), val=300 (2 bytes, bit=1)
-        // ctrl byte = 0b00000010 = 0x02
+        // val=5 (1 byte, bit=0), val=300 (2 bytes, bit=1) → ctrl=0x02
         let data: Vec<u8> = vec![0x02, 5, 0x2C, 0x01];
-        let out = decode_svb16(&data, 2).unwrap();
+        let out = Svb16.decode(&data, 2).unwrap();
         assert_eq!(out, vec![5u16, 300u16]);
     }
 
-    // ── VBZ ──────────────────────────────────────────────────────────────
-
-    // ── SVB16 encode ─────────────────────────────────────────────────────
+    // ── VBZ compress/decompress ───────────────────────────────────────────
 
     #[test]
     fn svb16_encode_decode_round_trip() {
         let values: Vec<u16> = vec![0, 1, 255, 256, 300, 1000, 65535];
-        let encoded = encode_svb16(&values);
-        let decoded = decode_svb16(&encoded, values.len()).unwrap();
+        let encoded = Svb16.encode(&values);
+        let decoded = Svb16.decode(&encoded, values.len()).unwrap();
         assert_eq!(decoded, values);
     }
-
-    // ── VBZ compress/decompress ───────────────────────────────────────────
 
     #[test]
     fn compress_vbz_empty() {

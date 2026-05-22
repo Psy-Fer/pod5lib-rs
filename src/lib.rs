@@ -61,7 +61,7 @@ pub use reader::Reader;
 pub use types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair, uuid_to_str,
 };
-pub use writer::{StreamingWriter, Writer};
+pub use writer::{DEFAULT_SIGNAL_BATCH_SIZE, StreamingWriter, Writer};
 
 /// Crate-wide `Result` type — equivalent to `std::result::Result<T, `[`Error`]`>`.
 pub type Result<T> = std::result::Result<T, Error>;

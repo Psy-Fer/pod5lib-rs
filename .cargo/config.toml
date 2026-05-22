@@ -1,4 +1,4 @@
 [alias]
-ci-fmt     = "fmt --all -- --check"
-ci-clippy  = "clippy --all-targets --all-features -- -D warnings"
-ci-test    = "test --all-features"
+ci-fmt     = "fmt -p pod5lib -- --check"
+ci-clippy  = "clippy -p pod5lib --all-targets -- -D warnings"
+ci-test    = "test -p pod5lib --all-features"

@@ -11,6 +11,17 @@ nanopore sequencing files — Oxford Nanopore Technologies' successor to FAST5.
   signal is compressed immediately per read, not accumulated
 - No unsafe code; pure Rust VBZ decompression (delta + zigzag + SVB16 + zstd)
 
+## Performance
+
+Benchmarked on a 4,282-read / 733 MB POD5 file (sequential scan, `--release`), compared against the Python `pod5` library.
+
+| Operation | Rust | Python | Ratio |
+|---|---|---|---|
+| Read (sequential) | ~1,360 ms, **31 MB** RSS | ~1,370 ms, 797 MB RSS | speed parity, **26× less RAM** |
+| Write (copy) | ~2,240 ms, **305 MB** RSS | ~4,035 ms, 885 MB RSS | **1.8× faster**, **3× less RAM** |
+
+`StreamingWriter` compresses signal in parallel rayon batches and streams compressed blobs to a background writer thread, keeping peak RSS bounded for arbitrarily large files.
+
 ## Installation
 
 Add to `Cargo.toml`:
