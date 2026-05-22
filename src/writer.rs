@@ -226,7 +226,7 @@ impl Default for Writer {
 ///
 /// VBZ compression runs on the calling thread; a background writer thread
 /// owns the `FileWriter` and flushes completed batches to disk.  A bounded
-/// channel (depth [`CHANNEL_DEPTH`]) limits in-flight reads so peak RSS stays
+/// channel limits in-flight reads so peak RSS stays
 /// near-constant regardless of file size.
 ///
 /// ```no_run
