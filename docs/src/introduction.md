@@ -13,14 +13,17 @@ nanopore sequencing files — Oxford Nanopore Technologies' successor to FAST5.
 
 ## Performance
 
-Benchmarked on a 4,282-read / 733 MB POD5 file (sequential scan, `--release`), compared against the Python `pod5` library.
+Benchmarked on a 500,000-read / 24.7 GB POD5 file, 64-core server, compared against the Python `pod5` library.
 
 | Operation | Rust | Python | Ratio |
 |---|---|---|---|
-| Read (sequential) | ~1,360 ms, **31 MB** RSS | ~1,370 ms, 797 MB RSS | speed parity, **26× less RAM** |
-| Write (copy) | ~2,240 ms, **305 MB** RSS | ~4,035 ms, 885 MB RSS | **1.8× faster**, **3× less RAM** |
+| Read — sequential | 54.6 s, **300 MB** RSS | 58.0 s, 23,769 MB RSS | speed parity, **79× less RAM** |
+| Read — parallel (16 threads) | **31.1 s**, **359 MB** RSS | 58.0 s, 23,769 MB RSS | **1.9× faster**, **66× less RAM** |
+| Write (50k reads) | **12.7 s**, **525 MB** RSS | 21.7 s, 2,531 MB RSS | **1.7× faster**, **5× less RAM** |
 
-`StreamingWriter` compresses signal in parallel rayon batches and streams compressed blobs to a background writer thread, keeping peak RSS bounded for arbitrarily large files.
+Python accumulates decompressed signal in RAM throughout iteration (~24 GB for a 24 GB file). Rust decompresses each read's signal on demand and discards it immediately, keeping RSS constant at ~300 MB regardless of file size.
+
+[`Reader::par_reads_iter(threads)`](https://docs.rs/pod5lib) decompresses signal in parallel using a rayon thread pool of the specified size. [`StreamingWriter`](https://docs.rs/pod5lib) compresses signal in parallel rayon batches and streams to a background writer thread.
 
 ## Installation
 
