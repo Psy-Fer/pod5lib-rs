@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use arrow::array::{Array, Int16Array, LargeBinaryArray, LargeListArray};
 use arrow::record_batch::RecordBatch;
+use rayon::prelude::*;
 
 use crate::{Error, Result};
 
@@ -157,6 +158,103 @@ impl SignalTable {
             }
         }
     }
+
+    /// Decompress signal for a batch of reads in parallel using `pool`.
+    ///
+    /// For `Lazy` tables: all blobs are read from disk inside **one** mutex acquisition
+    /// (sequential I/O), then released before parallel decompression begins.
+    /// For `Eager` tables: Arrow buffers are lock-free, so decompression is fully parallel.
+    ///
+    /// Returns one `Vec<i16>` per element of `batch_row_indices`, in order.
+    pub(crate) fn batch_decompress(
+        &self,
+        batch_row_indices: &[&[u64]],
+        pool: &rayon::ThreadPool,
+    ) -> Result<Vec<Vec<i16>>> {
+        match self {
+            SignalTable::Lazy { file, rows } => {
+                // I/O pass: read all compressed blobs under a single lock acquisition.
+                let all_blobs: Vec<Vec<RawSignalBlob>> = {
+                    let mut guard = file
+                        .lock()
+                        .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
+                    let mut result = Vec::with_capacity(batch_row_indices.len());
+                    for indices in batch_row_indices {
+                        let mut read_blobs = Vec::with_capacity(indices.len());
+                        for &idx in *indices {
+                            let row = rows
+                                .get(idx as usize)
+                                .ok_or(Error::SignalRowOutOfRange(idx, rows.len()))?;
+                            match row {
+                                LazySignalRow::Compressed {
+                                    file_offset,
+                                    compressed_len,
+                                    num_samples,
+                                } => {
+                                    guard.seek(SeekFrom::Start(*file_offset))?;
+                                    let mut blob = vec![0u8; *compressed_len as usize];
+                                    guard.read_exact(&mut blob)?;
+                                    read_blobs.push(RawSignalBlob::Compressed(blob, *num_samples));
+                                }
+                                LazySignalRow::Uncompressed(s) => {
+                                    read_blobs.push(RawSignalBlob::Uncompressed(s.clone()));
+                                }
+                            }
+                        }
+                        result.push(read_blobs);
+                    }
+                    result
+                };
+                // Decompress pass: fully parallel, lock already released.
+                pool.install(|| {
+                    all_blobs
+                        .par_iter()
+                        .map(|blobs| decompress_raw_blobs(blobs))
+                        .collect()
+                })
+            }
+            SignalTable::Eager { .. } => {
+                // No mutex: Arrow data is Arc-backed, safe to read from multiple threads.
+                pool.install(|| {
+                    batch_row_indices
+                        .par_iter()
+                        .map(|indices| self.samples_for_rows(indices))
+                        .collect()
+                })
+            }
+        }
+    }
+}
+
+// ── Raw blob type (parallel read pipeline) ────────────────────────────────────
+
+/// Intermediate representation used by the parallel read path: a compressed or
+/// uncompressed signal blob for one signal-table row, gathered before decompression.
+enum RawSignalBlob {
+    Compressed(Vec<u8>, u32),
+    Uncompressed(Box<[i16]>),
+}
+
+/// Decompress (or copy) a single read's raw blobs into a flat `i16` sample vector.
+fn decompress_raw_blobs(blobs: &[RawSignalBlob]) -> Result<Vec<i16>> {
+    let total: usize = blobs
+        .iter()
+        .map(|b| match b {
+            RawSignalBlob::Compressed(_, n) => *n as usize,
+            RawSignalBlob::Uncompressed(s) => s.len(),
+        })
+        .sum();
+    let mut out = Vec::with_capacity(total);
+    for blob in blobs {
+        match blob {
+            RawSignalBlob::Compressed(data, n) => {
+                let mut chunk = decompress_vbz(data, *n as usize)?;
+                out.append(&mut chunk);
+            }
+            RawSignalBlob::Uncompressed(s) => out.extend_from_slice(s),
+        }
+    }
+    Ok(out)
 }
 
 // ── VBZ compression ───────────────────────────────────────────────────────────

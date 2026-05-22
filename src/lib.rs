@@ -57,7 +57,7 @@ mod types;
 mod writer;
 
 pub use error::Error;
-pub use reader::Reader;
+pub use reader::{ParReadsIter, Reader};
 pub use types::{
     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair, uuid_to_str,
 };

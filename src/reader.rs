@@ -237,8 +237,43 @@ impl Reader {
     /// Iterate over reads in file order.
     ///
     /// Yields one `&ReadRecord` at a time without allocating a new collection.
+    /// Use [`par_reads_iter`](Self::par_reads_iter) to decompress signal in parallel.
     pub fn reads_iter(&self) -> impl Iterator<Item = &ReadRecord> {
         self.reads.iter()
+    }
+
+    /// Parallel variant of [`reads_iter`](Self::reads_iter): decompresses signal for
+    /// batches of reads concurrently, using `threads` worker threads.
+    ///
+    /// Reads are yielded in file order. For file-backed (lazy) signal tables, I/O is
+    /// still sequential — all blobs in a batch are read under a single lock acquisition —
+    /// and only the decompression step runs in parallel. For in-memory (eager) tables,
+    /// decompression is fully parallel.
+    ///
+    /// The internal batch size is `max(threads * 4, 16)`, bounding peak RSS to roughly
+    /// `batch_size × avg_signal_bytes` beyond the baseline metadata footprint.
+    ///
+    /// `threads = 0` lets rayon choose the thread count (typically `nproc`).
+    pub fn par_reads_iter(&self, threads: usize) -> ParReadsIter<'_> {
+        let n = if threads == 0 {
+            rayon::current_num_threads()
+        } else {
+            threads
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .expect("failed to build rayon thread pool");
+        let batch_size = (n * 4).max(16);
+        ParReadsIter {
+            reads: &self.reads,
+            pool: Arc::new(pool),
+            batch_size,
+            next_fetch: 0,
+            batch_start: 0,
+            batch_signals: Vec::new(),
+            batch_pos: 0,
+        }
     }
 
     /// Look up a single read by its UUID string (e.g. `"a1b2c3d4-0506-0708-090a-0b0c0d0e0f10"`).
@@ -284,6 +319,64 @@ impl Reader {
     /// Software string recorded in the footer when the file was created.
     pub fn software(&self) -> &str {
         &self.software
+    }
+}
+
+// ── ParReadsIter ──────────────────────────────────────────────────────────────
+
+/// Parallel reads iterator returned by [`Reader::par_reads_iter`].
+///
+/// Yields `Result<(&ReadRecord, Vec<i16>)>` in file order, decompressing signal
+/// for a batch of reads concurrently before surfacing individual results.
+pub struct ParReadsIter<'a> {
+    reads: &'a [ReadRecord],
+    pool: Arc<rayon::ThreadPool>,
+    batch_size: usize,
+    /// Next global read index to start an I/O batch from.
+    next_fetch: usize,
+    /// Global index of the first read in `batch_signals`.
+    batch_start: usize,
+    batch_signals: Vec<Vec<i16>>,
+    batch_pos: usize,
+}
+
+impl<'a> Iterator for ParReadsIter<'a> {
+    type Item = Result<(&'a ReadRecord, Vec<i16>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.batch_pos >= self.batch_signals.len() {
+            if self.next_fetch >= self.reads.len() {
+                return None;
+            }
+            let end = (self.next_fetch + self.batch_size).min(self.reads.len());
+            let chunk = &self.reads[self.next_fetch..end];
+
+            let row_indices: Vec<&[u64]> = chunk
+                .iter()
+                .map(|r| r.signal_row_indices.as_slice())
+                .collect();
+
+            let signal_table = &*chunk[0].signal_table;
+            match signal_table.batch_decompress(&row_indices, &self.pool) {
+                Ok(signals) => {
+                    self.batch_start = self.next_fetch;
+                    self.next_fetch = end;
+                    self.batch_signals = signals;
+                    self.batch_pos = 0;
+                }
+                Err(e) => {
+                    self.next_fetch = end;
+                    self.batch_signals.clear();
+                    self.batch_pos = 0;
+                    return Some(Err(e));
+                }
+            }
+        }
+
+        let read = &self.reads[self.batch_start + self.batch_pos];
+        let signal = std::mem::take(&mut self.batch_signals[self.batch_pos]);
+        self.batch_pos += 1;
+        Some(Ok((read, signal)))
     }
 }
 

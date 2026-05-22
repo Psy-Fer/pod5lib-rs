@@ -3,14 +3,17 @@
 //! Outputs a single JSON object to stdout; progress/warnings go to stderr.
 //!
 //! Modes:
-//!   sequential  <file.pod5>
-//!   random      <file.pod5>                      # read IDs on stdin
-//!   write       <file.pod5> [batch_size] [first_n]
+//!   sequential     <file.pod5>
+//!   par-sequential <file.pod5> <threads>          # parallel decompression
+//!   random         <file.pod5>                    # read IDs on stdin
+//!   write          <file.pod5> [batch_size] [first_n]
 //!
 //!   cargo run --example bench_pod5 --release --quiet -- sequential file.pod5
+//!   cargo run --example bench_pod5 --release --quiet -- par-sequential file.pod5 16
 //!   cargo run --example bench_pod5 --release --quiet -- write file.pod5 64 50000
 
 use pod5lib::{Reader, StreamingWriter};
+
 use serde::Serialize;
 use std::io::{self, BufRead};
 use std::time::Instant;
@@ -29,6 +32,8 @@ struct BenchResult {
     batch_size: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     first_n: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threads: Option<usize>,
 }
 
 fn peak_rss_kb() -> u64 {
@@ -51,13 +56,15 @@ fn main() {
     }
     let mode = args[1].as_str();
     let path = &args[2];
-    let batch_size: Option<usize> = args.get(3).and_then(|s| s.parse().ok());
+    // args[3] is threads for par-sequential, batch_size for write
+    let arg3: Option<usize> = args.get(3).and_then(|s| s.parse().ok());
     let first_n: Option<usize> = args.get(4).and_then(|s| s.parse().ok());
 
     let result = match mode {
         "sequential" => run_sequential(path),
+        "par-sequential" => run_par_sequential(path, arg3.unwrap_or(0)),
         "random" => run_random(path),
-        "write" => run_write(path, batch_size, first_n),
+        "write" => run_write(path, arg3, first_n),
         _ => {
             eprintln!("unknown mode: {mode}");
             std::process::exit(1);
@@ -97,6 +104,40 @@ fn run_sequential(path: &str) -> BenchResult {
         bytes_written: None,
         batch_size: None,
         first_n: None,
+        threads: None,
+    }
+}
+
+fn run_par_sequential(path: &str, threads: usize) -> BenchResult {
+    let t0 = Instant::now();
+    let reader = Reader::open(path).expect("open failed");
+    let total = reader.len();
+    let actual_threads = if threads == 0 {
+        rayon::current_num_threads()
+    } else {
+        threads
+    };
+    eprintln!("bench_pod5 par-sequential: {total} reads in {path}, threads={actual_threads}");
+
+    let mut n = 0usize;
+    for (i, result) in reader.par_reads_iter(threads).enumerate() {
+        let (_read, _signal) = result.expect("par decompress failed");
+        n += 1;
+        if i > 0 && i % 1000 == 0 {
+            eprintln!("  ... {i}/{total}");
+        }
+    }
+
+    BenchResult {
+        mode: "par-sequential".into(),
+        n_reads: n,
+        wall_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        peak_rss_kb: peak_rss_kb(),
+        read_ids: None,
+        bytes_written: None,
+        batch_size: None,
+        first_n: None,
+        threads: Some(actual_threads),
     }
 }
 
@@ -138,6 +179,7 @@ fn run_write(path: &str, batch_size: Option<usize>, first_n: Option<usize>) -> B
         bytes_written: Some(bytes),
         batch_size: Some(bs),
         first_n,
+        threads: None,
     }
 }
 
@@ -181,5 +223,6 @@ fn run_random(path: &str) -> BenchResult {
         bytes_written: None,
         batch_size: None,
         first_n: None,
+        threads: None,
     }
 }
