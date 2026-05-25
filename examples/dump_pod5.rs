@@ -59,9 +59,9 @@ struct ReadDump {
     signal_pa_first16: Vec<f32>,
     /// Last up-to-16 calibrated pA samples (in order).
     signal_pa_last16: Vec<f32>,
-    /// Full raw ADC signal — populated for the first FULL_SIGNAL_READS reads, null elsewhere.
+    /// Full raw ADC signal, populated for the first FULL_SIGNAL_READS reads, null elsewhere.
     signal_full: Option<Vec<i16>>,
-    /// Full calibrated pA signal — populated for the first FULL_SIGNAL_READS reads, null elsewhere.
+    /// Full calibrated pA signal, populated for the first FULL_SIGNAL_READS reads, null elsewhere.
     signal_pa_full: Option<Vec<f32>>,
 }
 

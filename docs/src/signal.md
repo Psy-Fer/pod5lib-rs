@@ -1,13 +1,13 @@
 # Signal & VBZ
 
-POD5 signal data is compressed with **VBZ** — a four-stage codec designed for 16-bit ADC
+POD5 signal data is compressed with **VBZ**, a four-stage codec designed for 16-bit ADC
 signal that exhibits short-range correlation.
 
 ## Compression pipeline
 
 ```
 raw i16 ADC samples
-  ──▶  delta encode       (1st-order differences — small values dominate)
+  ──▶  delta encode       (1st-order differences; small values dominate)
   ──▶  zigzag encode      (signed i16 → unsigned u16; small |values| → small codes)
   ──▶  SVB16 encode       (StreamVByte-16: 1 or 2 bytes/value, 1-bit control stream)
   ──▶  zstd               (outer entropy coding)

@@ -1,5 +1,5 @@
 //! Pure Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/)
-//! nanopore sequencing files — Oxford Nanopore Technologies' successor to FAST5.
+//! nanopore sequencing files, the successor to FAST5 from Oxford Nanopore Technologies.
 //!
 //! POD5 files embed three [Apache Arrow IPC](https://arrow.apache.org/docs/format/IPC.html)
 //! tables (Reads, Signal, RunInfo) in a binary container with a
@@ -17,10 +17,10 @@
 //! for read in reader.reads_iter() {
 //!     let adc = read.signal().unwrap();      // raw i16 ADC samples
 //!     let pa  = read.signal_pa().unwrap();   // calibrated picoamps (f32)
-//!     println!("{} — {} samples", read.read_id_str(), adc.len());
+//!     println!("{}: {} samples", read.read_id_str(), adc.len());
 //! }
 //!
-//! // Random access by UUID string — O(1)
+//! // Random access by UUID string (O(1))
 //! if let Some(read) = reader.get_read_by_id("a1b2c3d4-0506-0708-090a-0b0c0d0e0f10") {
 //!     let _ = read.signal_pa().unwrap();
 //! }
@@ -29,7 +29,7 @@
 //! ## Writing
 //!
 //! Use [`Writer`] for small files or when all reads are already in memory.
-//! Use [`StreamingWriter`] for large files — it VBZ-compresses each read's signal
+//! Use [`StreamingWriter`] for large files; it VBZ-compresses each read's signal
 //! immediately and does not hold decompressed samples beyond each [`StreamingWriter::write_read`] call.
 //!
 //! ```no_run
@@ -63,5 +63,5 @@ pub use types::{
 };
 pub use writer::{DEFAULT_SIGNAL_BATCH_SIZE, StreamingWriter, Writer};
 
-/// Crate-wide `Result` type — equivalent to `std::result::Result<T, `[`Error`]`>`.
+/// Crate-wide `Result` type, equivalent to `std::result::Result<T, `[`Error`]`>`.
 pub type Result<T> = std::result::Result<T, Error>;

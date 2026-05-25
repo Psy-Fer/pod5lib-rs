@@ -67,7 +67,7 @@ stores a list of the row indices that belong to it.
 
 | Column | Arrow type | Description |
 |---|---|---|
-| `acquisition_id` | `Utf8` | Primary key — matched by the Reads `run_info` dictionary |
+| `acquisition_id` | `Utf8` | Primary key, matched by the Reads `run_info` dictionary |
 | `sample_rate` | `UInt16` | ADC sampling rate (Hz) |
 | `adc_max` / `adc_min` | `Int16` | ADC output range |
 | `context_tags` | `Map<Utf8, Utf8>` | Experiment configuration key/value pairs |
@@ -85,7 +85,7 @@ stores a list of the row indices that belong to it.
 
 ## UUID byte order
 
-POD5 stores UUIDs as standard RFC 4122 **big-endian** bytes — identical to
+POD5 stores UUIDs as standard RFC 4122 **big-endian** bytes, identical to
 Python `uuid.UUID(bytes=data)`. `uuid_to_str` reads the 16 bytes in order to produce
 the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` string.
 

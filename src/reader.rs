@@ -1,4 +1,4 @@
-/// High-level POD5 file reader — public entry point.
+/// High-level POD5 file reader.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -28,7 +28,7 @@ use crate::{Error, Result};
 ///
 /// // Iterate in file order (streaming, one record at a time):
 /// for read in reader.reads_iter() {
-///     println!("{} — {} samples", read.read_id_str(), read.num_samples);
+///     println!("{}: {} samples", read.read_id_str(), read.num_samples);
 /// }
 ///
 /// // Random access by UUID string (O(1)):
@@ -246,7 +246,7 @@ impl Reader {
     /// batches of reads concurrently, using `threads` worker threads.
     ///
     /// Reads are yielded in file order. For file-backed (lazy) signal tables, I/O is
-    /// still sequential — all blobs in a batch are read under a single lock acquisition —
+    /// still sequential (all blobs in a batch are read under a single lock acquisition),
     /// and only the decompression step runs in parallel. For in-memory (eager) tables,
     /// decompression is fully parallel.
     ///
@@ -278,7 +278,7 @@ impl Reader {
 
     /// Look up a single read by its UUID string (e.g. `"a1b2c3d4-0506-0708-090a-0b0c0d0e0f10"`).
     ///
-    /// Returns `None` if no read with that ID exists. O(1) — uses an internal HashMap index.
+    /// Returns `None` if no read with that ID exists. O(1) via an internal HashMap index.
     pub fn get_read_by_id(&self, id: &str) -> Option<&ReadRecord> {
         let bytes = parse_uuid_str(id)?;
         self.reads_index.get(&bytes).map(|&i| &self.reads[i])
@@ -286,7 +286,7 @@ impl Reader {
 
     /// Return an iterator of reads matching `id` (0 or 1 items since UUIDs are unique).
     ///
-    /// Uses the internal HashMap index — O(1) lookup.
+    /// Uses the internal HashMap index for O(1) lookup.
     pub fn reads_by_id<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a ReadRecord> + 'a {
         self.get_read_by_id(id).into_iter()
     }

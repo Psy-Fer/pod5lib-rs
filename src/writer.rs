@@ -1,4 +1,4 @@
-/// POD5 file writer — buffered ([`Writer`]) and streaming ([`StreamingWriter`]).
+/// POD5 file writer: buffered ([`Writer`]) and streaming ([`StreamingWriter`]).
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -378,7 +378,7 @@ impl StreamingWriter {
 
 /// Core POD5 write loop executed in the background thread.
 ///
-/// `FileWriter` lives here as a local variable — the borrow checker is
+/// `FileWriter` lives here as a local variable; the borrow checker is
 /// satisfied because it borrows `out` for only the duration of its scope block,
 /// after which `out` is free to use again.
 fn run_writer_thread(

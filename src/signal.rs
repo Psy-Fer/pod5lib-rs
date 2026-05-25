@@ -21,7 +21,7 @@ use crate::{Error, Result};
 
 // ── Signal table ─────────────────────────────────────────────────────────────
 
-/// Signal store — either lazy (file-backed, reads signal on demand) or eager (in-memory).
+/// Signal store, either lazy (file-backed, reads signal on demand) or eager (in-memory).
 ///
 /// Signal data is decompressed lazily when `samples_for_rows` is called; opening a file
 /// only loads metadata (Reads + RunInfo tables).
@@ -135,7 +135,7 @@ impl SignalTable {
                             .as_any()
                             .downcast_ref::<LargeBinaryArray>()
                             .ok_or_else(|| Error::TypeMismatch("signal".into()))?;
-                        // arr.value(i) is a &[u8] borrowed from Arrow's Arc-backed buffer — no copy.
+                        // arr.value(i) is a &[u8] borrowed from Arrow's Arc-backed buffer (no copy).
                         let mut chunk = decompress_vbz(arr.value(i), row.num_samples as usize)?;
                         out.append(&mut chunk);
                     } else {
@@ -357,7 +357,7 @@ mod tests {
         }
     }
 
-    // ── SVB16 (via svb crate) — verifies ONT wire-format compatibility ────
+    // ── SVB16 (via svb crate) verifies ONT wire-format compatibility ────────
 
     #[test]
     fn svb16_single_byte_values() {

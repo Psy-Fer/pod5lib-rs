@@ -1,4 +1,4 @@
-//! VBZ decode pipeline breakdown — current 3-stage vs fused single-pass.
+//! VBZ decode pipeline breakdown: 3-stage vs fused single-pass.
 //!
 //!   cargo run --example decomp_stages --release -- file.pod5
 

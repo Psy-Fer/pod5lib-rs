@@ -168,7 +168,7 @@ pub(crate) fn parse_run_info_batches(batches: &[RecordBatch]) -> Result<Vec<Arc<
 /// Build a `SignalTable` from Arrow IPC record batches.
 ///
 /// Takes ownership of the batches so `SignalTable` can borrow from their buffers
-/// at decompression time — no byte copying.
+/// at decompression time (no byte copying).
 ///
 /// The `signal` column may be:
 ///   - `LargeBinary` with extension `minknow.vbz`  → compressed
