@@ -15,7 +15,6 @@ Usage (pytest):
     pytest tests/test_write_parity.py -s
 """
 
-import json
 import math
 import pathlib
 import subprocess
@@ -25,6 +24,9 @@ ROOT = pathlib.Path(__file__).parent.parent
 OUT_FILE = ROOT / "tests/data/rust_written.pod5"
 
 N_READS = 10
+# Full ADC signal is compared for the first FULL_SIGNAL_READS reads; the rest get
+# a checksum comparison (sum of all samples) to keep the test fast on large files.
+FULL_SIGNAL_READS = 5
 
 
 def find_test_file() -> pathlib.Path | None:
@@ -68,7 +70,7 @@ def approx_eq(a: float, b: float, rel=1e-5, abs_tol=1e-7) -> bool:
 def run_parity(src: pathlib.Path) -> None:
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    import pod5  # noqa: F401
+    import pod5
 
     n = min(N_READS, _count_reads_python(src))
 
@@ -83,6 +85,7 @@ def run_parity(src: pathlib.Path) -> None:
         for i, rec in enumerate(reader.reads()):
             if i >= n:
                 break
+            sig = rec.signal
             src_reads[str(rec.read_id)] = {
                 "read_number": rec.read_number,
                 "num_samples": rec.num_samples,
@@ -92,16 +95,21 @@ def run_parity(src: pathlib.Path) -> None:
                 "calib_offset": rec.calibration.offset,
                 "calib_scale": rec.calibration.scale,
                 "median_before": rec.median_before,
-                "end_reason": rec.end_reason.name,
-                "end_reason_forced": rec.end_reason.forced,
+                "end_reason": rec.end_reason.reason.name.lower(),
+                "end_reason_forced": bool(rec.end_reason.forced),
                 "run_info_acq_id": rec.run_info.acquisition_id,
-                "signal_len": len(rec.signal_pa),
+                "signal_len": int(len(sig)),
+                "signal_sum": int(sig.astype("int64").sum()),
+                "signal_first16": sig[:16].tolist(),
+                "signal_last16": sig[max(0, len(sig) - 16):].tolist(),
+                "signal_full": sig.tolist() if i < FULL_SIGNAL_READS else None,
             }
 
     # Collect written reads with Python pod5
     written_reads = {}
     with pod5.Reader(str(OUT_FILE)) as reader:
-        for rec in reader.reads():
+        for i, rec in enumerate(reader.reads()):
+            sig = rec.signal
             written_reads[str(rec.read_id)] = {
                 "read_number": rec.read_number,
                 "num_samples": rec.num_samples,
@@ -111,10 +119,14 @@ def run_parity(src: pathlib.Path) -> None:
                 "calib_offset": rec.calibration.offset,
                 "calib_scale": rec.calibration.scale,
                 "median_before": rec.median_before,
-                "end_reason": rec.end_reason.name,
-                "end_reason_forced": rec.end_reason.forced,
+                "end_reason": rec.end_reason.reason.name.lower(),
+                "end_reason_forced": bool(rec.end_reason.forced),
                 "run_info_acq_id": rec.run_info.acquisition_id,
-                "signal_len": len(rec.signal_pa),
+                "signal_len": int(len(sig)),
+                "signal_sum": int(sig.astype("int64").sum()),
+                "signal_first16": sig[:16].tolist(),
+                "signal_last16": sig[max(0, len(sig) - 16):].tolist(),
+                "signal_full": sig.tolist() if i < FULL_SIGNAL_READS else None,
             }
 
     assert len(written_reads) == n, (
@@ -128,20 +140,25 @@ def run_parity(src: pathlib.Path) -> None:
     for rid, s in src_reads.items():
         w = written_reads[rid]
         for field in ("read_number", "num_samples", "channel", "well",
-                      "pore_type", "end_reason_forced", "run_info_acq_id",
-                      "signal_len"):
+                      "pore_type", "end_reason", "end_reason_forced",
+                      "run_info_acq_id", "signal_len", "signal_sum",
+                      "signal_first16", "signal_last16"):
             if s[field] != w[field]:
-                fails.append(f"  {rid[:8]}… {field}: src={s[field]!r} written={w[field]!r}")
+                fails.append(f"  {rid[:8]}... {field}: src={s[field]!r} written={w[field]!r}")
         for field in ("calib_offset", "calib_scale", "median_before"):
             if not approx_eq(s[field], w[field]):
                 fails.append(
-                    f"  {rid[:8]}… {field}: src={s[field]:.6g} written={w[field]:.6g}"
+                    f"  {rid[:8]}... {field}: src={s[field]:.6g} written={w[field]:.6g}"
                 )
-        # end_reason name: pod5 sometimes returns enum name vs string; compare lowercase
-        if s["end_reason"].lower() != w["end_reason"].lower():
-            fails.append(
-                f"  {rid[:8]}… end_reason: src={s['end_reason']!r} written={w['end_reason']!r}"
-            )
+        if s["signal_full"] is not None:
+            if s["signal_full"] != w["signal_full"]:
+                first_bad = next(
+                    i for i, (a, b) in enumerate(zip(s["signal_full"], w["signal_full"])) if a != b
+                )
+                fails.append(
+                    f"  {rid[:8]}... signal_full mismatch at sample {first_bad}: "
+                    f"src={s['signal_full'][first_bad]} written={w['signal_full'][first_bad]}"
+                )
 
     if fails:
         print(f"\nPARITY FAILURES ({len(fails)}):")
@@ -152,7 +169,9 @@ def run_parity(src: pathlib.Path) -> None:
     print(f"\nAll {n} reads match between source and Rust-written file.")
     print("Fields checked: read_id, read_number, num_samples, channel, well, pore_type,")
     print("                calib_offset, calib_scale, median_before, end_reason,")
-    print("                end_reason_forced, run_info.acquisition_id, signal length")
+    print(f"                end_reason_forced, run_info.acquisition_id, signal_len,")
+    print(f"                signal_sum, signal_first16, signal_last16,")
+    print(f"                signal_full (first {FULL_SIGNAL_READS} reads)")
 
 
 def _count_reads_python(src: pathlib.Path) -> int:
