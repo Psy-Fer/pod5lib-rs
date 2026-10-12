@@ -389,3 +389,135 @@ fn reader_footer_magic_not_found() {
         "expected FooterMagicNotFound, got {err:?}"
     );
 }
+
+// ── Reads built from scratch (no source file) ─────────────────────────────────
+
+fn scratch_run_info() -> std::sync::Arc<pod5lib::RunInfo> {
+    std::sync::Arc::new(pod5lib::RunInfo {
+        acquisition_id: "a08e850aaa44c8b56765eee10b386fc3e516a62b".into(),
+        acquisition_start_time_ms: 1_700_000_000_000,
+        adc_min: -4096,
+        adc_max: 4095,
+        sample_rate: 5000,
+        flow_cell_id: "PAW00000".into(),
+        sequencing_kit: "SQK-LSK114".into(),
+        context_tags: [("sample_frequency".to_string(), "5000".to_string())].into(),
+        ..Default::default()
+    })
+}
+
+/// Two reads with deliberately wrong `num_samples` (the writer must use the
+/// signal length) and one channel that only fits in `channel_32bit`.
+fn scratch_reads() -> Vec<(pod5lib::ReadRecord, Vec<i16>)> {
+    use pod5lib::{Calibration, EndReason, EndReasonKind, Pore, ReadRecord, uuid_from_str};
+    let run_info = scratch_run_info();
+    let make = |id: &str, channel: u32, n: usize| {
+        let mut r = ReadRecord::new(
+            uuid_from_str(id).unwrap(),
+            Pore {
+                channel,
+                well: 2,
+                pore_type: "not_set".into(),
+            },
+            Calibration {
+                offset: -243.0,
+                scale: 0.1462,
+            },
+            channel * 10,
+            channel as u64 * 1000,
+            201.5,
+            EndReason {
+                reason: EndReasonKind::SignalPositive,
+                forced: false,
+            },
+            run_info.clone(),
+        );
+        r.num_samples = 999_999;
+        r.tracked_scaling = pod5lib::ShiftScalePair {
+            shift: 1.5,
+            scale: 2.5,
+        };
+        let signal: Vec<i16> = (0..n).map(|i| (i % 2000) as i16 - 1000).collect();
+        (r, signal)
+    };
+    vec![
+        make("0000173c-bf67-44e7-9a9c-1ad0bc728e74", 7, 12_345),
+        make("002fde30-9e23-4125-9eae-d112c18a81a7", 70_000, 3),
+    ]
+}
+
+fn check_scratch_reads(dst: &pod5lib::Reader) {
+    let expected = scratch_reads();
+    assert_eq!(dst.len(), expected.len());
+    assert_eq!(dst.run_infos().len(), 1);
+    let ri = &dst.run_infos()[0];
+    assert_eq!(ri.flow_cell_id, "PAW00000");
+    assert_eq!(ri.sample_rate, 5000);
+    assert_eq!(ri.context_tags["sample_frequency"], "5000");
+    for (orig, signal) in &expected {
+        let r = dst
+            .get_read_by_id(&orig.read_id_str())
+            .expect("read present");
+        assert_eq!(r.pore, orig.pore);
+        assert_eq!(r.read_number, orig.read_number);
+        assert_eq!(r.start_sample, orig.start_sample);
+        assert_eq!(r.median_before, orig.median_before);
+        assert_eq!(r.calibration, orig.calibration);
+        assert_eq!(r.end_reason, orig.end_reason);
+        assert_eq!(r.tracked_scaling, orig.tracked_scaling);
+        assert!(!r.predicted_scaling.is_available());
+        assert!(r.open_pore_level.is_nan() && r.selected_read_level.is_nan());
+        assert_eq!(
+            r.num_samples,
+            signal.len() as u64,
+            "num_samples from signal"
+        );
+        assert_eq!(&r.signal().unwrap(), signal);
+    }
+}
+
+#[test]
+fn read_record_new_defaults() {
+    let (r, _) = scratch_reads().remove(0);
+    assert!(r.signal().unwrap().is_empty());
+    assert_eq!(r.num_minknow_events, 0);
+    assert_eq!(r.time_since_mux_change, 0.0);
+    assert!(r.expected_open_pore_level.is_nan());
+}
+
+#[test]
+fn writer_from_scratch() {
+    let mut writer = pod5lib::Writer::new();
+    for (r, s) in scratch_reads() {
+        writer.add_read(r, s);
+    }
+    let mut buf = Vec::new();
+    writer.write_to(&mut buf).expect("write");
+    check_scratch_reads(&pod5lib::Reader::from_reader(&mut Cursor::new(buf)).unwrap());
+}
+
+#[test]
+fn streaming_writer_from_scratch() {
+    let path = std::env::temp_dir().join(format!("pod5lib-scratch-{}.pod5", std::process::id()));
+    let mut writer = pod5lib::StreamingWriter::create(&path).expect("create");
+    for (r, s) in scratch_reads() {
+        writer.write_read(&r, &s).expect("write_read");
+    }
+    writer.finish().expect("finish");
+    let dst = pod5lib::Reader::open(&path).expect("open");
+    check_scratch_reads(&dst);
+    drop(dst);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn uuid_from_str_round_trip() {
+    let id = "0000173c-bf67-44e7-9a9c-1ad0bc728e74";
+    let bytes = pod5lib::uuid_from_str(id).unwrap();
+    assert_eq!(pod5lib::uuid_to_str(&bytes), id);
+    assert_eq!(
+        pod5lib::uuid_from_str("0000173CBF6744E79A9C1AD0BC728E74"),
+        Some(bytes)
+    );
+    assert_eq!(pod5lib::uuid_from_str("not-a-uuid"), None);
+}

@@ -107,3 +107,6 @@ jobs:
             python tests/test_write_parity.py "tests/fixtures/multi_fast5_zip_v$v.pod5"
             echo "::endgroup::"
           done
+
+      - name: From-scratch write (ReadRecord::new, read back by Python)
+        run: python tests/test_scratch_parity.py

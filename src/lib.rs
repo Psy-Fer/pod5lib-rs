@@ -58,7 +58,8 @@ mod writer;
 pub use error::Error;
 pub use reader::{ParReadsIter, Reader};
 pub use types::{
-    Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair, uuid_to_str,
+    Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, ShiftScalePair,
+    uuid_from_str, uuid_to_str,
 };
 pub use writer::{DEFAULT_SIGNAL_BATCH_SIZE, StreamingWriter, Writer};
 

@@ -66,7 +66,7 @@ struct ReadMeta {
     tracked_scaling_shift: f32,
 }
 
-fn read_meta_from_record(record: &ReadRecord, ri_idx: usize) -> ReadMeta {
+fn read_meta_from_record(record: &ReadRecord, num_samples: u64, ri_idx: usize) -> ReadMeta {
     ReadMeta {
         read_id: record.read_id,
         read_number: record.read_number,
@@ -80,7 +80,7 @@ fn read_meta_from_record(record: &ReadRecord, ri_idx: usize) -> ReadMeta {
         end_reason_forced: record.end_reason.forced,
         num_minknow_events: record.num_minknow_events,
         num_reads_since_mux_change: record.num_reads_since_mux_change,
-        num_samples: record.num_samples,
+        num_samples,
         open_pore_level: record.open_pore_level,
         expected_open_pore_level: record.expected_open_pore_level,
         selected_read_level: record.selected_read_level,
@@ -363,7 +363,7 @@ impl StreamingWriter {
                 end_reason_forced: record.end_reason.forced,
                 num_minknow_events: record.num_minknow_events,
                 num_reads_since_mux_change: record.num_reads_since_mux_change,
-                num_samples: record.num_samples,
+                num_samples: signal.len() as u64,
                 open_pore_level: record.open_pore_level,
                 expected_open_pore_level: record.expected_open_pore_level,
                 selected_read_level: record.selected_read_level,
@@ -542,7 +542,11 @@ fn write_pod5_to_sink<W: Write>(
                 read_id_col.append_value(wr.record.read_id)?;
                 signal_col.append_value(vbz);
                 samples_col.append_value(wr.signal.len() as u32);
-                reads.push(read_meta_from_record(&wr.record, ri_idx));
+                reads.push(read_meta_from_record(
+                    &wr.record,
+                    wr.signal.len() as u64,
+                    ri_idx,
+                ));
             }
             let batch = RecordBatch::try_new(
                 sig_schema.clone(),

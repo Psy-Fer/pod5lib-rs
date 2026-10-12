@@ -25,6 +25,7 @@ cargo ci-test
 pip install pod5==0.3.49
 python tests/test_parity.py tests/fixtures/multi_fast5_zip_v7.pod5        # Rust vs Python reader
 python tests/test_write_parity.py tests/fixtures/multi_fast5_zip_v7.pod5  # Rust writer -> Python reader
+python tests/test_scratch_parity.py                                      # ReadRecord::new -> Python reader
 ```
 
 `tests/fixtures/` holds ONT's upstream test files, one per Reads-table version (V2–V7);

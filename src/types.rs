@@ -32,6 +32,14 @@ pub fn uuid_to_str(b: &[u8; 16]) -> String {
     )
 }
 
+/// Parse a UUID string into the 16 raw bytes stored in POD5 (inverse of [`uuid_to_str`]).
+///
+/// Accepts the hyphenated form as well as the other forms the `uuid` crate parses
+/// (simple, braced, URN), in either case. Returns `None` if `s` is not a UUID.
+pub fn uuid_from_str(s: &str) -> Option<[u8; 16]> {
+    uuid::Uuid::try_parse(s).ok().map(|u| u.into_bytes())
+}
+
 // ── Pore ──────────────────────────────────────────────────────────────────────
 
 /// Physical pore location on the flow cell.
@@ -182,7 +190,11 @@ impl ShiftScalePair {
 // ── RunInfo ───────────────────────────────────────────────────────────────────
 
 /// Per-experiment run context (one entry per MinKNOW acquisition).
-#[derive(Debug, Clone)]
+///
+/// `Default` gives empty strings, empty maps and zeros, for use with struct update
+/// syntax when building a `RunInfo` from scratch. At minimum set `acquisition_id`,
+/// `adc_min`/`adc_max` and `sample_rate`; Python `pod5` requires every field.
+#[derive(Debug, Clone, Default)]
 pub struct RunInfo {
     /// Unique identifier for the MinKNOW acquisition (hex UUID string).
     pub acquisition_id: String,
@@ -281,6 +293,81 @@ pub struct ReadRecord {
 }
 
 impl ReadRecord {
+    /// Create a read from scratch, e.g. when converting from another format.
+    ///
+    /// Takes the same required fields as Python `pod5.Read`. Other fields take
+    /// Python's defaults and can be set afterwards (all are public):
+    /// `num_minknow_events`, `num_reads_since_mux_change` = 0,
+    /// `time_since_mux_change` = 0.0, the scaling pairs =
+    /// [`ShiftScalePair::UNAVAILABLE`], and the open-pore / read levels = NaN.
+    ///
+    /// The record has no signal attached ([`Self::signal`] returns an empty vector)
+    /// and `num_samples` is 0. Pass the signal to the writer; it sets
+    /// `num_samples` from the signal length.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use pod5lib::{
+    ///     Calibration, EndReason, EndReasonKind, Pore, ReadRecord, RunInfo, Writer, uuid_from_str,
+    /// };
+    ///
+    /// let run_info = Arc::new(RunInfo {
+    ///     acquisition_id: "a08e850aaa44c8b56765eee10b386fc3e516a62b".into(),
+    ///     adc_min: -4096,
+    ///     adc_max: 4095,
+    ///     sample_rate: 5000,
+    ///     ..Default::default()
+    /// });
+    /// let read = ReadRecord::new(
+    ///     uuid_from_str("0000173c-bf67-44e7-9a9c-1ad0bc728e74").unwrap(),
+    ///     Pore { channel: 109, well: 1, pore_type: "not_set".into() },
+    ///     Calibration { offset: -243.0, scale: 0.1462 },
+    ///     1093,      // read_number
+    ///     4_096_000, // start_sample
+    ///     201.5,     // median_before
+    ///     EndReason { reason: EndReasonKind::SignalPositive, forced: false },
+    ///     run_info,
+    /// );
+    ///
+    /// let mut writer = Writer::new();
+    /// writer.add_read(read, vec![512, 498, 503, 520]);
+    /// let mut buf = Vec::new();
+    /// writer.write_to(&mut buf).unwrap();
+    /// ```
+    #[allow(clippy::too_many_arguments)] // mirrors Python `pod5.Read`'s required fields
+    pub fn new(
+        read_id: [u8; 16],
+        pore: Pore,
+        calibration: Calibration,
+        read_number: u32,
+        start_sample: u64,
+        median_before: f32,
+        end_reason: EndReason,
+        run_info: Arc<RunInfo>,
+    ) -> Self {
+        Self {
+            read_id,
+            read_number,
+            pore,
+            calibration,
+            end_reason,
+            run_info,
+            median_before,
+            num_samples: 0,
+            start_sample,
+            tracked_scaling: ShiftScalePair::UNAVAILABLE,
+            predicted_scaling: ShiftScalePair::UNAVAILABLE,
+            num_minknow_events: 0,
+            num_reads_since_mux_change: 0,
+            time_since_mux_change: 0.0,
+            open_pore_level: f32::NAN,
+            expected_open_pore_level: f32::NAN,
+            selected_read_level: f32::NAN,
+            signal_row_indices: Vec::new(),
+            signal_table: Arc::new(SignalTable::empty()),
+        }
+    }
+
     /// Human-readable UUID string (e.g. `"a1b2c3d4-..."`).
     pub fn read_id_str(&self) -> String {
         uuid_to_str(&self.read_id)

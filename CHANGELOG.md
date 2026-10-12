@@ -8,11 +8,15 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Fixed
 
+- Writers now take `num_samples` from the signal they are given rather than from the record, so the Reads and Signal tables cannot disagree.
 - **Files written by pod5lib could not be opened by Python `pod5` ≥ 0.3.47** ("Invalid footer found in file"). The FlatBuffers footer is now padded to a multiple of 8 bytes and its `int64` fields are 8-byte aligned, matching upstream's builder.
 - Files with a V6 Reads table (`channel` as `UInt32`, written by `pod5` 0.3.46–0.3.47) failed to open with a type mismatch.
 
 ### Added
 
+- `ReadRecord::new`: build reads from scratch (e.g. when converting from FAST5/BLOW5) with the same required fields as Python `pod5.Read`; other fields take Python's defaults. See `examples/write_from_scratch.rs`.
+- `uuid_from_str`: parse a read ID string into the 16 bytes stored in POD5 (inverse of `uuid_to_str`).
+- `RunInfo` implements `Default`, for struct update syntax.
 - `Error::LegacyPod5Version`: files from `pod5` older than 0.0.38 (Reads table V0–V2) now fail with a clear error suggesting `pod5 update`, instead of a misleading "RunInfoTable missing".
 - Test fixtures from ONT's pod5 repository (`tests/fixtures/`, Reads table V2–V7, MPL-2.0) with per-version tests; file-backed integration tests now run in CI instead of being skipped.
 - CI job checking interop with Python `pod5` 0.3.49 and 0.3.39 (read parity and write parity on every fixture).

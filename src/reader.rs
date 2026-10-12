@@ -11,7 +11,7 @@ use crate::format::{
     align8, parse_pod5_version,
 };
 use crate::tables;
-use crate::types::{ReadRecord, RunInfo};
+use crate::types::{ReadRecord, RunInfo, uuid_from_str};
 use crate::{Error, Result};
 
 // ── Reader ────────────────────────────────────────────────────────────────────
@@ -291,7 +291,7 @@ impl Reader {
     ///
     /// Returns `None` if no read with that ID exists. O(1) via an internal HashMap index.
     pub fn get_read_by_id(&self, id: &str) -> Option<&ReadRecord> {
-        let bytes = parse_uuid_str(id)?;
+        let bytes = uuid_from_str(id)?;
         self.reads_index.get(&bytes).map(|&i| &self.reads[i])
     }
 
@@ -397,36 +397,5 @@ impl<'a> Iterator for ParReadsIter<'a> {
         let signal = std::mem::take(&mut self.batch_signals[self.batch_pos]);
         self.batch_pos += 1;
         Some(Ok((read, signal)))
-    }
-}
-
-// ── UUID string parser ────────────────────────────────────────────────────────
-
-/// Parse a canonical UUID string (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) into 16 bytes.
-/// Returns `None` on any format error.
-fn parse_uuid_str(s: &str) -> Option<[u8; 16]> {
-    let s = s.as_bytes();
-    if s.len() != 36 || s[8] != b'-' || s[13] != b'-' || s[18] != b'-' || s[23] != b'-' {
-        return None;
-    }
-    let hex: Vec<u8> = s.iter().filter(|&&b| b != b'-').copied().collect();
-    if hex.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 16];
-    for (i, chunk) in hex.chunks(2).enumerate() {
-        let hi = from_hex(chunk[0])?;
-        let lo = from_hex(chunk[1])?;
-        out[i] = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn from_hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }

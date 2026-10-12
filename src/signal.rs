@@ -67,6 +67,14 @@ pub(crate) struct SignalRowRef {
 }
 
 impl SignalTable {
+    /// A table with no rows, backing records built with `ReadRecord::new`.
+    pub(crate) fn empty() -> Self {
+        SignalTable::Eager {
+            batches: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+
     /// Decompress and concatenate signal rows identified by `indices`.
     pub fn samples_for_rows(&self, indices: &[u64]) -> Result<Vec<i16>> {
         match self {

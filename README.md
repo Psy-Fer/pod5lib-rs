@@ -13,6 +13,7 @@ Pure Rust library for reading and writing [POD5](https://pod5-file-format.readth
 - Read POD5 files: iterate reads, random-access by UUID, decompress VBZ signal
 - Write POD5 files compatible with the Python `pod5` library
 - Streaming writer (`StreamingWriter`) for memory-efficient writing of large files
+- Build reads from scratch with `ReadRecord::new` (e.g. converting from FAST5/BLOW5)
 - No unsafe code; pure Rust VBZ decompression (delta + zigzag + SVB16 + zstd)
 
 ## Quick start
@@ -107,6 +108,9 @@ Signal is compressed with VBZ: delta-encode → zigzag-encode → SVB16 → zstd
 |---|---|
 | `arrow` (ipc feature) | Arrow IPC reading and writing |
 | `zstd` | zstd compression/decompression for VBZ signal |
+| `svb` | SIMD SVB16 encode/decode for VBZ signal |
+| `rayon` | Parallel signal compression and decompression |
+| `uuid` | Random `file_identifier` generation and UUID parsing |
 | `thiserror` | Error derive |
 
 ## Acknowledgements
