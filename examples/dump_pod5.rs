@@ -24,7 +24,7 @@ struct Dump {
 struct ReadDump {
     read_id: String,
     read_number: u32,
-    pore_channel: u16,
+    pore_channel: u32,
     pore_well: u8,
     pore_type: String,
     calibration_offset: f32,
@@ -46,6 +46,10 @@ struct ReadDump {
     time_since_mux_change: Option<f32>,
     /// `null` when the optional open_pore_level column is absent.
     open_pore_level: Option<f32>,
+    /// `null` when the optional V5 column is absent.
+    expected_open_pore_level: Option<f32>,
+    /// `null` when the optional V5 column is absent.
+    selected_read_level: Option<f32>,
     run_info_acquisition_id: String,
     /// Decompressed ADC signal length (== num_samples).
     signal_len: usize,
@@ -162,6 +166,8 @@ fn main() {
                 num_reads_since_mux_change: read.num_reads_since_mux_change,
                 time_since_mux_change: finite(read.time_since_mux_change),
                 open_pore_level: finite(read.open_pore_level),
+                expected_open_pore_level: finite(read.expected_open_pore_level),
+                selected_read_level: finite(read.selected_read_level),
                 run_info_acquisition_id: read.run_info.acquisition_id.clone(),
                 signal_len: sig_len,
                 signal_first16: first16,

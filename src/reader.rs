@@ -45,6 +45,7 @@ pub struct Reader {
     pod5_version: String,
     file_identifier: String,
     software: String,
+    reads_table_version: u8,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ struct ParsedTables {
     footer: Footer,
     run_info_batches: Vec<arrow::record_batch::RecordBatch>,
     reads_batches: Vec<arrow::record_batch::RecordBatch>,
+    reads_table_version: u8,
     signal_off: u64,
     signal_len: u64,
 }
@@ -136,8 +138,8 @@ impl Reader {
             find(ContentType::RunInfoTable).ok_or(Error::MissingTable("RunInfoTable"))?;
 
         // ── 6. Load RunInfo and Reads Arrow IPC sections ──────────────────
-        let run_info_batches = tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
-        let reads_batches = tables::read_ipc_section(reader, reads_off, reads_len)?;
+        let (_, run_info_batches) = tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
+        let (reads_schema, reads_batches) = tables::read_ipc_section(reader, reads_off, reads_len)?;
 
         // Cross-validate MINKNOW:file_identifier between footer and RunInfo/Reads schemas.
         for (table_name, batches) in [("RunInfo", &run_info_batches), ("Reads", &reads_batches)] {
@@ -157,6 +159,7 @@ impl Reader {
             footer,
             run_info_batches,
             reads_batches,
+            reads_table_version: tables::reads_table_version(&reads_schema),
             signal_off,
             signal_len,
         })
@@ -180,6 +183,7 @@ impl Reader {
             pod5_version: pt.footer.pod5_version,
             file_identifier: pt.footer.file_identifier,
             software: pt.footer.software,
+            reads_table_version: pt.reads_table_version,
         })
     }
 
@@ -206,7 +210,7 @@ impl Reader {
     /// Loads all three tables (Reads, RunInfo, Signal) eagerly into memory.
     pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self> {
         let pt = Self::parse_tables(reader)?;
-        let signal_batches = tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
+        let (_, signal_batches) = tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
 
         // Cross-validate Signal table file_identifier for the eager path.
         if let Some(batch) = signal_batches.first()
@@ -319,6 +323,15 @@ impl Reader {
     /// Software string recorded in the footer when the file was created.
     pub fn software(&self) -> &str {
         &self.software
+    }
+
+    /// Reads-table schema version actually stored in the file (3–7), detected from
+    /// its columns. Equivalent to Python `pod5.Reader.physical_read_table_version`.
+    ///
+    /// Reads are always presented with the latest fields regardless of this value;
+    /// fields missing from older tables are NaN.
+    pub fn reads_table_version(&self) -> u8 {
+        self.reads_table_version
     }
 }
 

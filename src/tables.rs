@@ -13,7 +13,7 @@ use arrow::array::{
     ListArray, MapArray, StringArray, TimestampMillisecondArray, UInt8Array, UInt16Array,
     UInt32Array, UInt64Array,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::ipc::reader::FileReader;
 use arrow::record_batch::RecordBatch;
 
@@ -27,23 +27,24 @@ use crate::types::{
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Read an embedded Arrow IPC section from `file` into memory, then drive the
-/// arrow-ipc `FileReader` over it to collect all record batches.
+/// arrow-ipc `FileReader` over it to collect the schema and all record batches.
 pub(crate) fn read_ipc_section<R: Read + Seek>(
     reader: &mut R,
     offset: u64,
     length: u64,
-) -> Result<Vec<RecordBatch>> {
+) -> Result<(SchemaRef, Vec<RecordBatch>)> {
     let mut buf = vec![0u8; length as usize];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
 
     let cursor = Cursor::new(buf);
     let ipc = FileReader::try_new(cursor, None)?;
+    let schema = ipc.schema();
     let mut batches = Vec::new();
     for batch in ipc {
         batches.push(batch?);
     }
-    Ok(batches)
+    Ok((schema, batches))
 }
 
 // ── column accessors ─────────────────────────────────────────────────────────
@@ -418,6 +419,78 @@ pub(crate) fn parse_signal_section_lazy(
 
 // ── Reads table ───────────────────────────────────────────────────────────────
 
+/// Detect the Reads-table schema version from its columns, as upstream pod5 does.
+///
+/// - V4 adds `open_pore_level`
+/// - V5 adds `expected_open_pore_level` and `selected_read_level`
+/// - V6 widens `channel` to `UInt32`
+/// - V7 restores `channel` to `UInt16` and adds `channel_32bit` (`UInt32`)
+///
+/// Tables older than V4 report 3.
+pub(crate) fn reads_table_version(schema: &Schema) -> u8 {
+    let has = |name: &str, dt: &DataType| {
+        schema
+            .field_with_name(name)
+            .is_ok_and(|f| f.data_type() == dt)
+    };
+    if has("channel_32bit", &DataType::UInt32) {
+        7
+    } else if has("channel", &DataType::UInt32) {
+        6
+    } else if has("expected_open_pore_level", &DataType::Float32)
+        && has("selected_read_level", &DataType::Float32)
+    {
+        5
+    } else if has("open_pore_level", &DataType::Float32) {
+        4
+    } else {
+        3
+    }
+}
+
+/// Channel number at row `i`, accepting the V3–V5/V7 `UInt16` layout, the V6
+/// `UInt32` layout, and preferring the V7 `channel_32bit` column when present.
+enum ChannelCol<'a> {
+    U16(&'a UInt16Array),
+    U32(&'a UInt32Array),
+}
+
+impl<'a> ChannelCol<'a> {
+    fn from_batch(batch: &'a RecordBatch) -> Result<Self> {
+        if let Some(c) = batch
+            .column_by_name("channel_32bit")
+            .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+        {
+            return Ok(Self::U32(c));
+        }
+        let c = batch
+            .column_by_name("channel")
+            .ok_or_else(|| Error::MissingColumn("channel".into()))?;
+        if let Some(c) = c.as_any().downcast_ref::<UInt16Array>() {
+            Ok(Self::U16(c))
+        } else if let Some(c) = c.as_any().downcast_ref::<UInt32Array>() {
+            Ok(Self::U32(c))
+        } else {
+            Err(Error::TypeMismatch("channel".into()))
+        }
+    }
+
+    fn value(&self, i: usize) -> u32 {
+        match self {
+            Self::U16(c) => c.value(i) as u32,
+            Self::U32(c) => c.value(i),
+        }
+    }
+}
+
+/// Value of an optional nullable `Float32` column at row `i`; NaN if absent or null.
+fn opt_f32(col: Option<&Float32Array>, i: usize) -> f32 {
+    col.map_or(
+        f32::NAN,
+        |c| if c.is_null(i) { f32::NAN } else { c.value(i) },
+    )
+}
+
 /// Parse all Reads-table batches into `ReadRecord` structs.
 ///
 /// `run_infos` must already be built from the RunInfo table; the `run_info`
@@ -439,7 +512,7 @@ pub(crate) fn parse_reads_batches(
         // Fixed columns
         let read_id_col = col!(batch, "read_id", FixedSizeBinaryArray)?;
         let read_number_col = col!(batch, "read_number", UInt32Array)?;
-        let channel_col = col!(batch, "channel", UInt16Array)?;
+        let channel_col = ChannelCol::from_batch(batch)?;
         let well_col = col!(batch, "well", UInt8Array)?;
         let calib_offset_col = col!(batch, "calibration_offset", Float32Array)?;
         let calib_scale_col = col!(batch, "calibration_scale", Float32Array)?;
@@ -456,9 +529,15 @@ pub(crate) fn parse_reads_batches(
             .column_by_name("time_since_mux_change")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
-        // Optional v4 column
+        // Optional v4/v5 columns
         let open_pore_col = batch
             .column_by_name("open_pore_level")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+        let expected_open_pore_col = batch
+            .column_by_name("expected_open_pore_level")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+        let selected_read_level_col = batch
+            .column_by_name("selected_read_level")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
         // Optional scaling columns
@@ -564,13 +643,89 @@ pub(crate) fn parse_reads_batches(
                 num_minknow_events: num_events_col.value(i),
                 num_reads_since_mux_change: num_reads_mux_col.map_or(0, |c| c.value(i)),
                 time_since_mux_change: time_mux_col.map_or(0.0, |c| c.value(i)),
-                open_pore_level: open_pore_col.map_or(f32::NAN, |c| {
-                    if c.is_null(i) { f32::NAN } else { c.value(i) }
-                }),
+                open_pore_level: opt_f32(open_pore_col, i),
+                expected_open_pore_level: opt_f32(expected_open_pore_col, i),
+                selected_read_level: opt_f32(selected_read_level_col, i),
                 signal_row_indices,
                 signal_table: Arc::clone(&signal_table),
             });
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::Field;
+
+    fn reads_schema(extra: &[(&str, DataType)], channel: DataType) -> Schema {
+        let mut fields = vec![
+            Field::new("read_id", DataType::FixedSizeBinary(16), false),
+            Field::new("channel", channel, false),
+        ];
+        fields.extend(extra.iter().map(|(n, t)| Field::new(*n, t.clone(), true)));
+        Schema::new(fields)
+    }
+
+    #[test]
+    fn detects_reads_table_versions() {
+        let v4 = [("open_pore_level", DataType::Float32)];
+        let v5 = [
+            ("open_pore_level", DataType::Float32),
+            ("expected_open_pore_level", DataType::Float32),
+            ("selected_read_level", DataType::Float32),
+        ];
+        let v7 = [
+            ("open_pore_level", DataType::Float32),
+            ("expected_open_pore_level", DataType::Float32),
+            ("selected_read_level", DataType::Float32),
+            ("channel_32bit", DataType::UInt32),
+        ];
+        assert_eq!(reads_table_version(&reads_schema(&[], DataType::UInt16)), 3);
+        assert_eq!(reads_table_version(&reads_schema(&v4, DataType::UInt16)), 4);
+        assert_eq!(reads_table_version(&reads_schema(&v5, DataType::UInt16)), 5);
+        assert_eq!(reads_table_version(&reads_schema(&v5, DataType::UInt32)), 6);
+        assert_eq!(reads_table_version(&reads_schema(&v7, DataType::UInt16)), 7);
+    }
+
+    fn batch(cols: Vec<(&str, Arc<dyn Array>)>) -> RecordBatch {
+        RecordBatch::try_from_iter(cols).unwrap()
+    }
+
+    #[test]
+    fn channel_u16() {
+        let b = batch(vec![("channel", Arc::new(UInt16Array::from(vec![7u16])))]);
+        assert_eq!(ChannelCol::from_batch(&b).unwrap().value(0), 7);
+    }
+
+    #[test]
+    fn channel_v6_u32() {
+        let b = batch(vec![(
+            "channel",
+            Arc::new(UInt32Array::from(vec![70_000u32])),
+        )]);
+        assert_eq!(ChannelCol::from_batch(&b).unwrap().value(0), 70_000);
+    }
+
+    #[test]
+    fn channel_v7_prefers_channel_32bit() {
+        let b = batch(vec![
+            ("channel", Arc::new(UInt16Array::from(vec![0u16]))),
+            (
+                "channel_32bit",
+                Arc::new(UInt32Array::from(vec![70_000u32])),
+            ),
+        ]);
+        assert_eq!(ChannelCol::from_batch(&b).unwrap().value(0), 70_000);
+    }
+
+    #[test]
+    fn channel_wrong_type_errors() {
+        let b = batch(vec![("channel", Arc::new(UInt8Array::from(vec![1u8])))]);
+        assert!(matches!(
+            ChannelCol::from_batch(&b),
+            Err(Error::TypeMismatch(_))
+        ));
+    }
 }

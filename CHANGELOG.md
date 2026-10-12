@@ -2,6 +2,25 @@
 
 All notable changes to pod5lib will be documented here.
 
+## [Unreleased]
+
+Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
+
+### Fixed
+
+- **Files written by pod5lib could not be opened by Python `pod5` ≥ 0.3.47** ("Invalid footer found in file"). The FlatBuffers footer is now padded to a multiple of 8 bytes and its `int64` fields are 8-byte aligned, matching upstream's builder.
+- Files with a V6 Reads table (`channel` as `UInt32`, written by `pod5` 0.3.46–0.3.47) failed to open with a type mismatch.
+
+### Added
+
+- `ReadRecord::expected_open_pore_level` and `ReadRecord::selected_read_level` (Reads table V5), NaN when absent.
+- `Reader::reads_table_version()`: the Reads-table schema version stored in the file (3–7), equivalent to Python `Reader.physical_read_table_version`.
+
+### Changed
+
+- **Breaking:** `Pore::channel` is now `u32`. It is read from `channel_32bit` when present, so channels above 65535 are preserved.
+- Writers now emit a V7 Reads table: adds `expected_open_pore_level`, `selected_read_level` and `channel_32bit`, while `channel` stays `UInt16` (0 when it does not fit in 16 bits). Older `pod5` versions still read these files and ignore the new columns.
+
 ## [0.1.0] - 2026-05-23
 
 Initial release.

@@ -38,7 +38,10 @@ pub fn uuid_to_str(b: &[u8; 16]) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pore {
     /// 1-indexed channel number.
-    pub channel: u16,
+    ///
+    /// Read from `channel_32bit` when present (Reads table V7+), so channels above
+    /// 65535 are preserved.
+    pub channel: u32,
     /// 1-indexed well number.
     pub well: u8,
     /// Pore type identifier string (e.g. `"pore_type_not_set"`).
@@ -265,8 +268,12 @@ pub struct ReadRecord {
     pub num_reads_since_mux_change: u32,
     /// Seconds since the last mux change.
     pub time_since_mux_change: f32,
-    /// Open-pore level for this read (pA).
+    /// Open-pore level for this read (pA); NaN if not recorded.
     pub open_pore_level: f32,
+    /// Expected open-pore level for this read (pA); NaN if not recorded (Reads table V5+).
+    pub expected_open_pore_level: f32,
+    /// Selected read level for this read (pA); NaN if not recorded (Reads table V5+).
+    pub selected_read_level: f32,
 
     // Private: signal lazy-load backing.
     pub(crate) signal_row_indices: Vec<u64>,

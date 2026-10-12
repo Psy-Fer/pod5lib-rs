@@ -35,7 +35,7 @@ The reference for correctness is the Python `pod5` library. Before submitting a 
 2. Verify files written by pod5lib-rs are readable by Python `pod5`
 3. Note the Python `pod5` version you tested against in the PR description
 
-The currently validated version is **0.3.39**. If you test against a newer version and it still works, update `CHANGELOG.md` and the compatibility note in `README.md`.
+The currently validated versions are **0.3.39** and **0.3.49**. If you test against a newer version and it still works, update `CHANGELOG.md` and the compatibility note in `README.md`.
 
 ## Reporting bugs
 

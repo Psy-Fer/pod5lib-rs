@@ -123,6 +123,9 @@ def read_with_python(pod5_path: pathlib.Path) -> dict:
 
             # open_pore_level may not exist in all pod5 versions / files
             opl = _finite_or_null(getattr(rec, "open_pore_level", float("nan")))
+            # V5 fields only exist in pod5 >= 0.3.44
+            eopl = _finite_or_null(getattr(rec, "expected_open_pore_level", float("nan")))
+            srl = _finite_or_null(getattr(rec, "selected_read_level", float("nan")))
 
             ri = rec.run_info
             # Full signal for the first FULL_SIGNAL_READS reads (matches dump_pod5.rs constant).
@@ -155,6 +158,8 @@ def read_with_python(pod5_path: pathlib.Path) -> dict:
                     "num_reads_since_mux_change": int(rec.num_reads_since_mux_change),
                     "time_since_mux_change": _finite_or_null(rec.time_since_mux_change),
                     "open_pore_level": opl,
+                    "expected_open_pore_level": eopl,
+                    "selected_read_level": srl,
                     "run_info_acquisition_id": ri.acquisition_id,
                     "signal_len": sig_len,
                     "signal_first16": first16,
@@ -268,6 +273,8 @@ def compare_reads(rust_reads: list, py_reads: list) -> None:
             "predicted_scaling_shift",
             "predicted_scaling_scale",
             "open_pore_level",
+            "expected_open_pore_level",
+            "selected_read_level",
         ):
             _close(r[field], p[field], label=f"{prefix}.{field}")
 

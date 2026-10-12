@@ -275,6 +275,41 @@ fn writer_empty_file() {
     let mut cursor = Cursor::new(buf);
     let dst = pod5lib::Reader::from_reader(&mut cursor).expect("read back failed");
     assert!(dst.is_empty());
+    assert_eq!(
+        dst.reads_table_version(),
+        7,
+        "writer should emit Reads table V7"
+    );
+}
+
+#[test]
+fn writer_round_trip_v7_fields() {
+    let Some(path) = sample_pod5() else {
+        return;
+    };
+    let src = pod5lib::Reader::open(&path).expect("open source");
+    let Some(orig) = src.reads_iter().next() else {
+        return;
+    };
+
+    // A channel that only fits in `channel_32bit`, plus explicit V5 values.
+    let mut read = orig.clone();
+    read.pore.channel = 70_000;
+    read.expected_open_pore_level = 210.5;
+    read.selected_read_level = 85.25;
+
+    let mut writer = pod5lib::Writer::new();
+    writer.file_identifier = src.file_identifier().to_string();
+    writer.add_read(read, orig.signal().expect("decompress"));
+    let mut buf = Vec::new();
+    writer.write_to(&mut buf).expect("write_to failed");
+
+    let dst = pod5lib::Reader::from_reader(&mut Cursor::new(buf)).expect("read back failed");
+    assert_eq!(dst.reads_table_version(), 7);
+    let written = &dst.reads()[0];
+    assert_eq!(written.pore.channel, 70_000);
+    assert_eq!(written.expected_open_pore_level, 210.5);
+    assert_eq!(written.selected_read_level, 85.25);
 }
 
 // ── Reader error-path tests (no file needed) ──────────────────────────────────

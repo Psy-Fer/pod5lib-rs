@@ -40,7 +40,7 @@ pub const DEFAULT_SIGNAL_BATCH_SIZE: usize = 64;
 struct ReadMeta {
     read_id: [u8; 16],
     read_number: u32,
-    channel: u16,
+    channel: u32,
     well: u8,
     pore_type: String,
     calib_offset: f32,
@@ -52,6 +52,8 @@ struct ReadMeta {
     num_reads_since_mux_change: u32,
     num_samples: u64,
     open_pore_level: f32,
+    expected_open_pore_level: f32,
+    selected_read_level: f32,
     predicted_scaling_scale: f32,
     predicted_scaling_shift: f32,
     ri_idx: usize,
@@ -77,6 +79,8 @@ fn read_meta_from_record(record: &ReadRecord, ri_idx: usize) -> ReadMeta {
         num_reads_since_mux_change: record.num_reads_since_mux_change,
         num_samples: record.num_samples,
         open_pore_level: record.open_pore_level,
+        expected_open_pore_level: record.expected_open_pore_level,
+        selected_read_level: record.selected_read_level,
         predicted_scaling_scale: record.predicted_scaling.scale,
         predicted_scaling_shift: record.predicted_scaling.shift,
         ri_idx,
@@ -92,7 +96,7 @@ fn read_meta_from_record(record: &ReadRecord, ri_idx: usize) -> ReadMeta {
 struct WriterMsg {
     read_id: [u8; 16],
     read_number: u32,
-    channel: u16,
+    channel: u32,
     well: u8,
     pore_type: String,
     calib_offset: f32,
@@ -104,6 +108,8 @@ struct WriterMsg {
     num_reads_since_mux_change: u32,
     num_samples: u64,
     open_pore_level: f32,
+    expected_open_pore_level: f32,
+    selected_read_level: f32,
     predicted_scaling_scale: f32,
     predicted_scaling_shift: f32,
     run_info: Arc<RunInfo>,
@@ -341,6 +347,8 @@ impl StreamingWriter {
                 num_reads_since_mux_change: record.num_reads_since_mux_change,
                 num_samples: record.num_samples,
                 open_pore_level: record.open_pore_level,
+                expected_open_pore_level: record.expected_open_pore_level,
+                selected_read_level: record.selected_read_level,
                 predicted_scaling_scale: record.predicted_scaling.scale,
                 predicted_scaling_shift: record.predicted_scaling.shift,
                 run_info: Arc::clone(&record.run_info),
@@ -645,6 +653,8 @@ fn drain_signal_batch(
             num_reads_since_mux_change: msg.num_reads_since_mux_change,
             num_samples: msg.num_samples,
             open_pore_level: msg.open_pore_level,
+            expected_open_pore_level: msg.expected_open_pore_level,
+            selected_read_level: msg.selected_read_level,
             predicted_scaling_scale: msg.predicted_scaling_scale,
             predicted_scaling_shift: msg.predicted_scaling_shift,
             ri_idx,
@@ -987,6 +997,11 @@ fn build_reads_ipc(
             Field::new("tracked_scaling_scale", DataType::Float32, false),
             Field::new("tracked_scaling_shift", DataType::Float32, false),
             Field::new("signal", DataType::List(signal_item), false),
+            // Reads table V5 fields
+            Field::new("expected_open_pore_level", DataType::Float32, false),
+            Field::new("selected_read_level", DataType::Float32, false),
+            // Reads table V7: `channel` holds 0 for channels that do not fit in 16 bits
+            Field::new("channel_32bit", DataType::UInt32, false),
         ],
         meta,
     ));
@@ -1003,6 +1018,9 @@ fn build_reads_ipc(
     let mut num_reads_mux_col = UInt32Builder::new();
     let mut num_samples_col = UInt64Builder::new();
     let mut open_pore_col = Float32Builder::new();
+    let mut expected_open_pore_col = Float32Builder::new();
+    let mut selected_read_level_col = Float32Builder::new();
+    let mut channel_32bit_col = UInt32Builder::new();
     let mut pr_scale_col = Float32Builder::new();
     let mut pr_shift_col = Float32Builder::new();
     let mut start_col = UInt64Builder::new();
@@ -1018,7 +1036,8 @@ fn build_reads_ipc(
     for (signal_row_idx, rm) in reads.iter().enumerate() {
         read_id_col.append_value(rm.read_id)?;
         read_number_col.append_value(rm.read_number);
-        channel_col.append_value(rm.channel);
+        channel_col.append_value(u16::try_from(rm.channel).unwrap_or(0));
+        channel_32bit_col.append_value(rm.channel);
         well_col.append_value(rm.well);
         pore_type_vals.push(&rm.pore_type);
         calib_offset_col.append_value(rm.calib_offset);
@@ -1030,6 +1049,8 @@ fn build_reads_ipc(
         num_reads_mux_col.append_value(rm.num_reads_since_mux_change);
         num_samples_col.append_value(rm.num_samples);
         open_pore_col.append_value(rm.open_pore_level);
+        expected_open_pore_col.append_value(rm.expected_open_pore_level);
+        selected_read_level_col.append_value(rm.selected_read_level);
         pr_scale_col.append_value(rm.predicted_scaling_scale);
         pr_shift_col.append_value(rm.predicted_scaling_shift);
         run_info_keys.push(rm.ri_idx as i16);
@@ -1082,6 +1103,9 @@ fn build_reads_ipc(
             Arc::new(tr_scale_col.finish()),
             Arc::new(tr_shift_col.finish()),
             Arc::new(signal_col.finish()),
+            Arc::new(expected_open_pore_col.finish()),
+            Arc::new(selected_read_level_col.finish()),
+            Arc::new(channel_32bit_col.finish()),
         ],
     )?;
 

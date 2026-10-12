@@ -210,15 +210,19 @@ pub(crate) fn parse(data: &[u8]) -> Result<Footer> {
 /// placed immediately BEFORE their tables (positive soffset) so that the
 /// FlatBuffers verifier accepts the buffer without modification.
 ///
-/// Layout (N = contents.len()):
+/// Like a real FlatBuffers builder, the `i64` fields are 8-byte aligned and the
+/// total size is a multiple of 8. Upstream pod5 relies on the latter: it reads the
+/// footer as the `footer_length` bytes immediately before the length field.
+///
+/// Layout (N = contents.len(), P = 0 or 4 bytes of alignment padding):
 /// ```text
 /// [0..4]      root uoffset = 16  (Footer table at pos 16)
 /// [4..16]     Footer vtable (12 bytes)
 /// [16..36]    Footer table  (soffset=12, then 4 field uoffsets)
 /// [36..40+4N] contents vector: count + N element uoffsets
 /// [40+4N..52+4N]  EmbeddedFile vtable (shared, 12 bytes)
-/// [52+4N..]   N EmbeddedFile tables (24 bytes each)
-/// [52+28N..]  string data
+/// [52+4N+P..]     N EmbeddedFile tables (24 bytes each; i64 fields 8-byte aligned)
+/// [..]        string data, then zero padding to a multiple of 8
 /// ```
 pub(crate) fn build_footer(
     file_identifier: &str,
@@ -233,7 +237,10 @@ pub(crate) fn build_footer(
     let footer_table: u32 = 16; // Footer table at pos 16
     let contents_vec: u32 = 36; // contents vector at pos 36
     let ef_vtable: u32 = 40 + 4 * n; // EmbeddedFile vtable
-    let ef_start: u32 = 52 + 4 * n; // first EmbeddedFile table
+    // First EmbeddedFile table; its i64 fields sit at +4 and +12, so the table
+    // itself must start at 4 (mod 8).
+    let ef_pad: u32 = if (52 + 4 * n) % 8 == 4 { 0 } else { 4 };
+    let ef_start: u32 = 52 + 4 * n + ef_pad;
     let str_start: u32 = ef_start + 24 * n; // first string
 
     // FlatBuffers strings: 4-byte length prefix + bytes + 1 null terminator,
@@ -283,6 +290,7 @@ pub(crate) fn build_footer(
     buf.extend_from_slice(&12u16.to_le_bytes()); // field 1: i64 length
     buf.extend_from_slice(&20u16.to_le_bytes()); // field 2: i16 format
     buf.extend_from_slice(&22u16.to_le_bytes()); // field 3: i16 content_type
+    buf.extend(std::iter::repeat_n(0u8, ef_pad as usize));
 
     // [52+4N..] EmbeddedFile tables (24 bytes each)
     for (i, &(offset, length, content_type)) in contents.iter().enumerate() {
@@ -307,6 +315,7 @@ pub(crate) fn build_footer(
         buf.extend(std::iter::repeat_n(0u8, pad));
     }
 
+    buf.resize(buf.len().next_multiple_of(8), 0);
     buf
 }
 
@@ -412,6 +421,24 @@ mod tests {
         assert_eq!(footer.contents[2].offset, 4096);
         assert_eq!(footer.contents[2].length, 2048);
         assert_eq!(footer.contents[2].content_type, ContentType::ReadsTable);
+    }
+
+    #[test]
+    fn build_footer_alignment() {
+        for n in 0..5 {
+            let contents: Vec<_> = (0..n).map(|i| (i * 8, 8, 0i16)).collect();
+            let fb = build_footer("file-uuid", "sw", "0.3.48", &contents);
+            assert_eq!(fb.len() % 8, 0, "footer size not 8-aligned for n={n}");
+            // Follow each contents element's uoffset (at 40 + 4i) to its table;
+            // the i64 fields are at table+4 and table+12.
+            for i in 0..n as usize {
+                let elem = 40 + 4 * i;
+                let table =
+                    elem + u32::from_le_bytes(fb[elem..elem + 4].try_into().unwrap()) as usize;
+                assert_eq!((table + 4) % 8, 0, "misaligned i64 for n={n}, i={i}");
+            }
+            assert_eq!(parse(&fb).unwrap().contents.len(), n as usize);
+        }
     }
 
     #[test]

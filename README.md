@@ -87,7 +87,7 @@ Python's RSS for the sequential read case (~24 GB) matches the uncompressed file
 
 ## Compatibility
 
-Tested against Python `pod5` **0.3.39**. Files produced by either library are fully readable by the other. POD5 files with `pod5_version` strings in the `0.3.x` series are fully supported.
+Tested against Python `pod5` **0.3.39** and **0.3.49**. Files produced by either library are fully readable by the other. POD5 files with `pod5_version` strings in the `0.3.x` series are fully supported.
 
 The POD5 format is specified and maintained by Oxford Nanopore Technologies at [github.com/nanoporetech/pod5-file-format](https://github.com/nanoporetech/pod5-file-format).
 

@@ -36,6 +36,8 @@ The FlatBuffers `Footer.contents` vector lists the byte offset and length of eac
 | `read_id` | `FixedSizeBinary(16)` | UUID in RFC 4122 big-endian byte order |
 | `signal` | `List<UInt64>` | Row indices into the Signal table |
 | `read_number` | `UInt32` | Sequential read counter |
+| `channel` | `UInt16` (`UInt32` in V6) | Channel number; 0 in V7 when it does not fit in 16 bits |
+| `well` | `UInt8` | Well number |
 | `start_sample` | `UInt64` | Absolute sample offset in the acquisition |
 | `median_before` | `Float32` | Open-channel level before the read (pA); nullable |
 | `num_samples` | `UInt64` | Total ADC samples |
@@ -51,6 +53,15 @@ The FlatBuffers `Footer.contents` vector lists the byte offset and length of eac
 | `num_reads_since_mux_change` | `UInt32` | (deprecated; optional) |
 | `time_since_mux_change` | `Float32` | (deprecated; optional) |
 | `open_pore_level` | `Float32` | Open-pore level (pA); nullable |
+| `expected_open_pore_level` | `Float32` | Expected open-pore level (pA); V5+, NaN if absent |
+| `selected_read_level` | `Float32` | Selected read level (pA); V5+, NaN if absent |
+| `channel_32bit` | `UInt32` | Full channel number; V7+, preferred over `channel` when present |
+
+The Reads-table version is inferred from its columns, as upstream pod5 does
+([`Reader::reads_table_version`](https://docs.rs/pod5lib/latest/pod5lib/struct.Reader.html#method.reads_table_version)):
+V4 adds `open_pore_level`; V5 adds `expected_open_pore_level` and `selected_read_level`;
+V6 widens `channel` to `UInt32`; V7 restores `channel` to `UInt16` and adds `channel_32bit`.
+The reader accepts V3–V7. The writer always emits V7.
 
 ### Signal table
 
