@@ -8,6 +8,7 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Fixed
 
+- The crate did not build on its stated minimum Rust version (1.87): it used `let` chains, stable only from 1.88. CI now builds and tests on 1.87.
 - Writers now take `num_samples` from the signal they are given rather than from the record, so the Reads and Signal tables cannot disagree.
 - **Files written by pod5lib could not be opened by Python `pod5` ≥ 0.3.47** ("Invalid footer found in file"). The FlatBuffers footer is now padded to a multiple of 8 bytes and its `int64` fields are 8-byte aligned, matching upstream's builder.
 - Files with a V6 Reads table (`channel` as `UInt32`, written by `pod5` 0.3.46–0.3.47) failed to open with a type mismatch.

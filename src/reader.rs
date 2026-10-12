@@ -5,6 +5,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use arrow::datatypes::Schema;
+
 use crate::footer::{self, ContentType, Footer};
 use crate::format::{
     FOOTER_LEN_FIELD_FROM_END, FOOTER_MAGIC, MIN_POD5_VERSION, SECTION_MARKER_LEN, SIGNATURE,
@@ -145,22 +147,13 @@ impl Reader {
             find(ContentType::RunInfoTable).ok_or(Error::MissingTable("RunInfoTable"))?;
 
         // ── 6. Load RunInfo and Reads Arrow IPC sections ──────────────────
-        let (_, run_info_batches) = tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
+        let (run_info_schema, run_info_batches) =
+            tables::read_ipc_section(reader, runinfo_off, runinfo_len)?;
         let (reads_schema, reads_batches) = tables::read_ipc_section(reader, reads_off, reads_len)?;
 
         // Cross-validate MINKNOW:file_identifier between footer and RunInfo/Reads schemas.
-        for (table_name, batches) in [("RunInfo", &run_info_batches), ("Reads", &reads_batches)] {
-            if let Some(batch) = batches.first()
-                && let Some(schema_id) = batch.schema().metadata().get("MINKNOW:file_identifier")
-                && schema_id != &footer.file_identifier
-            {
-                return Err(Error::FileIdentifierMismatch(
-                    table_name.to_string(),
-                    schema_id.clone(),
-                    footer.file_identifier.clone(),
-                ));
-            }
-        }
+        check_file_identifier("RunInfo", &run_info_schema, &footer.file_identifier)?;
+        check_file_identifier("Reads", &reads_schema, &footer.file_identifier)?;
 
         Ok(ParsedTables {
             footer,
@@ -217,19 +210,11 @@ impl Reader {
     /// Loads all three tables (Reads, RunInfo, Signal) eagerly into memory.
     pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self> {
         let pt = Self::parse_tables(reader)?;
-        let (_, signal_batches) = tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
+        let (signal_schema, signal_batches) =
+            tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
 
         // Cross-validate Signal table file_identifier for the eager path.
-        if let Some(batch) = signal_batches.first()
-            && let Some(schema_id) = batch.schema().metadata().get("MINKNOW:file_identifier")
-            && schema_id != &pt.footer.file_identifier
-        {
-            return Err(Error::FileIdentifierMismatch(
-                "Signal".to_string(),
-                schema_id.clone(),
-                pt.footer.file_identifier.clone(),
-            ));
-        }
+        check_file_identifier("Signal", &signal_schema, &pt.footer.file_identifier)?;
 
         let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
         Self::finish(pt, signal_table)
@@ -339,6 +324,18 @@ impl Reader {
     /// fields missing from older tables are NaN.
     pub fn reads_table_version(&self) -> u8 {
         self.reads_table_version
+    }
+}
+
+/// Error if a table's `MINKNOW:file_identifier` schema metadata disagrees with the footer.
+fn check_file_identifier(table: &str, schema: &Schema, footer_id: &str) -> Result<()> {
+    match schema.metadata().get("MINKNOW:file_identifier") {
+        Some(schema_id) if schema_id != footer_id => Err(Error::FileIdentifierMismatch(
+            table.to_string(),
+            schema_id.clone(),
+            footer_id.to_string(),
+        )),
+        _ => Ok(()),
     }
 }
 
