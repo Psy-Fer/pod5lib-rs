@@ -37,14 +37,43 @@ pub(crate) fn read_ipc_section<R: Read + Seek>(
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
 
-    let cursor = Cursor::new(buf);
-    let ipc = FileReader::try_new(cursor, None)?;
-    let schema = ipc.schema();
-    let mut batches = Vec::new();
-    for batch in ipc {
-        batches.push(batch?);
+    check_ipc_blocks(&buf)?;
+    // arrow-ipc can panic on malformed input instead of returning an error;
+    // treat that as a malformed file.
+    std::panic::catch_unwind(move || -> Result<(SchemaRef, Vec<RecordBatch>)> {
+        let ipc = FileReader::try_new(Cursor::new(buf), None)?;
+        let schema = ipc.schema();
+        let batches = ipc.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((schema, batches))
+    })
+    .unwrap_or_else(|_| Err(malformed("Arrow IPC table could not be decoded")))
+}
+
+/// arrow-ipc sizes its read buffers from the block table in the Arrow IPC footer
+/// without checking them against the data, so a corrupt length becomes a huge
+/// allocation. Check every block lies inside the section before handing it over.
+fn check_ipc_blocks(buf: &[u8]) -> Result<()> {
+    // Trailer: [i32 footer length]["ARROW1"]
+    let n = buf.len();
+    if n < 10 || &buf[n - 6..] != b"ARROW1" {
+        return Err(malformed("Arrow IPC magic not found at end of table"));
     }
-    Ok((schema, batches))
+    let footer_start = usize::try_from(i32::from_le_bytes(buf[n - 10..n - 6].try_into().unwrap()))
+        .ok()
+        .and_then(|len| (n - 10).checked_sub(len))
+        .ok_or_else(|| malformed("invalid Arrow footer length"))?;
+    let footer = arrow::ipc::root_as_footer(&buf[footer_start..n - 10])
+        .map_err(|e| Error::FlatBuffers(format!("Arrow IPC footer parse error: {e}")))?;
+    let blocks = footer.dictionaries().into_iter().flatten();
+    for block in blocks.chain(footer.recordBatches().into_iter().flatten()) {
+        let end = add_offset(0, block.offset())
+            .and_then(|start| add_offset(start, block.metaDataLength() as i64))
+            .and_then(|end| add_offset(end, block.bodyLength()))?;
+        if end > footer_start as u64 {
+            return Err(malformed("Arrow IPC block extends past its table"));
+        }
+    }
+    Ok(())
 }
 
 // ── column accessors ─────────────────────────────────────────────────────────
@@ -76,7 +105,10 @@ fn dict_str<'a>(batch: &'a RecordBatch, name: &str, i: usize) -> Result<&'a str>
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| Error::TypeMismatch(name.into()))?;
-    let key = dict.keys().value(i) as usize;
+    let key = usize::try_from(dict.keys().value(i))
+        .ok()
+        .filter(|&k| k < values.len())
+        .ok_or_else(|| malformed(&format!("dictionary key out of range in '{name}'")))?;
     Ok(values.value(key))
 }
 
@@ -200,221 +232,224 @@ pub(crate) fn parse_signal_batches(batches: Vec<RecordBatch>) -> Result<SignalTa
     Ok(SignalTable::Eager { batches, index })
 }
 
-/// Build a lazy `SignalTable` by reading only row metadata from the Arrow IPC section.
+/// Bounds-checked reads from one embedded section of the file. Offsets come from
+/// the file itself, so every range is checked to lie inside the section.
+struct Section<'f> {
+    file: &'f mut File,
+    start: u64,
+    len: u64,
+}
+
+impl Section<'_> {
+    /// Read `len` bytes at offset `rel` from the section start.
+    fn read(&mut self, rel: u64, len: u64) -> Result<Vec<u8>> {
+        if rel.checked_add(len).is_none_or(|end| end > self.len) {
+            return Err(malformed("Signal table offset outside its section"));
+        }
+        self.file.seek(SeekFrom::Start(self.start + rel))?;
+        let mut buf = vec![0u8; len as usize];
+        self.file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+fn malformed(what: &str) -> Error {
+    Error::Malformed(what.to_string())
+}
+
+/// `a + b` for file offsets, failing on overflow or negative inputs.
+fn add_offset(a: u64, b: i64) -> Result<u64> {
+    u64::try_from(b)
+        .ok()
+        .and_then(|b| a.checked_add(b))
+        .ok_or_else(|| malformed("invalid Signal table offset"))
+}
+
+/// Build a `SignalTable` for `Reader::open`, reading only row metadata.
 ///
-/// Unlike `parse_signal_batches`, this function does NOT load the signal blob data
-/// into memory. It reads the Arrow IPC footer and per-batch message headers to extract
-/// the file offsets and lengths of each VBZ blob, storing them as `LazySignalRow`
-/// entries. Signal bytes are read from `file` on demand when `samples_for_rows` is called.
+/// For the layout upstream writes (VBZ `signal`, columns `read_id, signal, samples`,
+/// no Arrow body compression) this reads the Arrow IPC footer and per-batch message
+/// headers to find each VBZ blob's position, and returns a lazy table that reads
+/// blobs from `file` on demand. Any other layout falls back to loading the section
+/// with [`parse_signal_batches`].
 ///
 /// `section_offset` and `section_len` are the absolute byte position and length of the
-/// Signal IPC section within the .pod5 file (as reported by the FlatBuffers footer).
+/// Signal IPC section (already checked to lie inside the file). The schema's
+/// `MINKNOW:file_identifier` is checked against `file_identifier`.
 pub(crate) fn parse_signal_section_lazy(
     file: Arc<Mutex<File>>,
     section_offset: u64,
     section_len: u64,
-) -> crate::Result<SignalTable> {
-    // ── 1. Read Arrow IPC footer from end of section ──────────────────────────
-    // Arrow IPC file footer layout (last 10 bytes of section):
-    //   [4 bytes] footer_length (i32 LE, unpadded flatbuffer byte count)
-    //   [6 bytes] "ARROW1" magic
-    const ARROW_FOOTER_SUFFIX: usize = 10;
-    const ARROW_MAGIC: &[u8; 6] = b"ARROW1";
-
-    let mut guard = file
-        .lock()
-        .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
-
-    let suffix_pos = section_offset + section_len - ARROW_FOOTER_SUFFIX as u64;
-    guard.seek(SeekFrom::Start(suffix_pos))?;
-    let mut suffix = [0u8; ARROW_FOOTER_SUFFIX];
-    guard.read_exact(&mut suffix)?;
-
-    if &suffix[4..10] != ARROW_MAGIC {
-        return Err(Error::FlatBuffers(
-            "Arrow IPC magic 'ARROW1' not found at end of Signal section".into(),
-        ));
-    }
-
-    let arrow_footer_len = i32::from_le_bytes(suffix[0..4].try_into().unwrap()) as u64;
-    if arrow_footer_len == 0 {
-        // Empty signal table
-        drop(guard);
-        return Ok(SignalTable::Lazy {
-            file,
-            rows: Vec::new(),
-        });
-    }
-
-    let arrow_footer_start =
-        section_offset + section_len - ARROW_FOOTER_SUFFIX as u64 - arrow_footer_len;
-    guard.seek(SeekFrom::Start(arrow_footer_start))?;
-    let mut footer_bytes = vec![0u8; arrow_footer_len as usize];
-    guard.read_exact(&mut footer_bytes)?;
-
-    let arrow_footer = arrow::ipc::root_as_footer(&footer_bytes)
-        .map_err(|e| Error::FlatBuffers(format!("Arrow IPC footer parse error: {e}")))?;
-
-    // ── 2. Determine VBZ vs uncompressed from schema ──────────────────────────
-    // VBZ: field 1 is LargeBinary (type_type != LargeList)
-    // Uncompressed: field 1 is LargeList
-    let is_vbz = arrow_footer
-        .schema()
-        .and_then(|s| s.fields())
-        .map(|fields| {
-            // Signal table schema: field 0 = read_id (FixedSizeBinary), field 1 = signal
-            fields.len() <= 1 || fields.get(1).type_type() != arrow::ipc::Type::LargeList
-        })
-        .unwrap_or(true); // default to VBZ
-
-    // ── 3. Parse each RecordBatch block ───────────────────────────────────────
-    let record_batches = match arrow_footer.recordBatches() {
-        Some(rb) => rb,
-        None => {
-            drop(guard);
-            return Ok(SignalTable::Lazy {
-                file,
-                rows: Vec::new(),
-            });
+    file_identifier: &str,
+) -> Result<SignalTable> {
+    let rows = {
+        let mut guard = file.lock().unwrap_or_else(|e| e.into_inner());
+        let mut section = Section {
+            file: &mut guard,
+            start: section_offset,
+            len: section_len,
+        };
+        match lazy_signal_rows(&mut section, file_identifier)? {
+            Some(rows) => rows,
+            None => {
+                let (schema, batches) = read_ipc_section(&mut *guard, section_offset, section_len)?;
+                check_file_identifier("Signal", &schema, file_identifier)?;
+                return parse_signal_batches(batches);
+            }
         }
     };
+    Ok(SignalTable::Lazy { file, rows })
+}
 
-    let mut rows: Vec<LazySignalRow> = Vec::new();
+/// Row metadata for the lazy fast path, or `None` if the section's layout needs
+/// the general (eager) parser.
+fn lazy_signal_rows(
+    section: &mut Section<'_>,
+    file_identifier: &str,
+) -> Result<Option<Vec<LazySignalRow>>> {
+    // Arrow IPC file trailer: [i32 footer length]["ARROW1"]
+    const SUFFIX: u64 = 10;
+    if section.len < SUFFIX {
+        return Err(malformed("Signal table section too short"));
+    }
+    let suffix = section.read(section.len - SUFFIX, SUFFIX)?;
+    if &suffix[4..10] != b"ARROW1" {
+        return Err(malformed(
+            "Arrow IPC magic not found at end of Signal table",
+        ));
+    }
+    let footer_len = u64::try_from(i32::from_le_bytes(suffix[0..4].try_into().unwrap()))
+        .map_err(|_| malformed("negative Arrow footer length"))?;
+    let footer_start = (section.len - SUFFIX)
+        .checked_sub(footer_len)
+        .ok_or_else(|| malformed("Arrow footer length exceeds Signal table"))?;
+    let footer_bytes = section.read(footer_start, footer_len)?;
+    let footer = arrow::ipc::root_as_footer(&footer_bytes)
+        .map_err(|e| Error::FlatBuffers(format!("Arrow IPC footer parse error: {e}")))?;
 
-    for block in record_batches {
-        // Arrow IPC block offsets are relative to the section start, NOT absolute.
-        let abs_msg_start = section_offset + block.offset() as u64;
-        let meta_len = block.metaDataLength() as u64;
-        let body_start = abs_msg_start + meta_len;
+    // Only the layout upstream writes takes the fast path.
+    let Some(schema) = footer.schema() else {
+        return Ok(None);
+    };
+    let schema_id = schema.custom_metadata().and_then(|kvs| {
+        kvs.iter()
+            .find(|kv| kv.key() == Some("MINKNOW:file_identifier"))
+            .and_then(|kv| kv.value())
+    });
+    check_file_identifier_value("Signal", schema_id, file_identifier)?;
+    let expected = [
+        ("read_id", arrow::ipc::Type::FixedSizeBinary),
+        ("signal", arrow::ipc::Type::LargeBinary),
+        ("samples", arrow::ipc::Type::Int),
+    ];
+    let layout_ok = schema.fields().is_some_and(|fields| {
+        fields.len() == expected.len()
+            && fields
+                .iter()
+                .zip(expected)
+                .all(|(f, (name, ty))| f.name() == Some(name) && f.type_type() == ty)
+    });
+    if !layout_ok {
+        return Ok(None);
+    }
 
-        // Read the message header (continuation marker + size + flatbuffer)
-        guard.seek(SeekFrom::Start(abs_msg_start))?;
-        let mut meta_bytes = vec![0u8; meta_len as usize];
-        guard.read_exact(&mut meta_bytes)?;
+    let mut rows = Vec::new();
+    for block in footer.recordBatches().into_iter().flatten() {
+        let msg_start = add_offset(0, block.offset())?;
+        let meta_len = u64::try_from(block.metaDataLength())
+            .map_err(|_| malformed("negative Arrow metadata length"))?;
+        let body_start = add_offset(msg_start, meta_len as i64)?;
+        let body_len = u64::try_from(block.bodyLength())
+            .map_err(|_| malformed("negative Arrow body length"))?;
 
-        // Arrow IPC message header layout:
-        //   [4 bytes] continuation marker (0xFFFFFFFF)
-        //   [4 bytes] metadata size (i32 LE)
-        //   [N bytes] flatbuffer message
-        //   [padding] to 8-byte boundary
-        if meta_bytes.len() < 8 {
-            return Err(Error::FlatBuffers(
-                "Arrow IPC message header too short".into(),
-            ));
+        // Message header: [0xFFFFFFFF][i32 size][flatbuffer Message][padding]
+        let meta = section.read(msg_start, meta_len)?;
+        if meta.len() < 8 {
+            return Err(malformed("Arrow IPC message header too short"));
         }
-        let msg = arrow::ipc::root_as_message(&meta_bytes[8..])
+        let msg = arrow::ipc::root_as_message(&meta[8..])
             .map_err(|e| Error::FlatBuffers(format!("Arrow IPC message parse error: {e}")))?;
-
         let rb = msg
             .header_as_record_batch()
-            .ok_or_else(|| Error::FlatBuffers("Arrow IPC message is not a RecordBatch".into()))?;
-
-        let n_rows = rb.length() as usize;
+            .ok_or_else(|| malformed("Arrow IPC message is not a record batch"))?;
+        if rb.compression().is_some() {
+            return Ok(None);
+        }
+        let n_rows =
+            usize::try_from(rb.length()).map_err(|_| malformed("negative Signal batch length"))?;
         if n_rows == 0 {
             continue;
         }
-
+        // Buffers: read_id [0] validity, [1] data; signal [2] validity, [3] i64
+        // offsets, [4] blob data; samples [5] validity, [6] data.
         let buffers = rb
             .buffers()
-            .ok_or_else(|| Error::FlatBuffers("RecordBatch has no buffers".into()))?;
-
-        if is_vbz {
-            // VBZ (LargeBinary) buffer layout for Signal table schema:
-            //   FixedSizeBinary(16): buffers[0] validity, buffers[1] data
-            //   LargeBinary:         buffers[2] validity, buffers[3] int64 offsets, buffers[4] blob data
-            //   UInt32:              buffers[5] validity, buffers[6] data
-            if buffers.len() < 7 {
-                return Err(Error::FlatBuffers(format!(
-                    "VBZ signal batch has only {} buffers (expected ≥7)",
-                    buffers.len()
-                )));
+            .filter(|b| b.len() == 7)
+            .ok_or_else(|| malformed("unexpected Signal batch buffer count"))?;
+        let body_buffer = |i: usize, min_len: u64| -> Result<(u64, u64)> {
+            let b = buffers.get(i);
+            let (off, len) = (add_offset(0, b.offset())?, add_offset(0, b.length())?);
+            if off.checked_add(len).is_none_or(|end| end > body_len) || len < min_len {
+                return Err(malformed("Signal batch buffer outside its message body"));
             }
+            Ok((body_start + off, len))
+        };
+        let n = n_rows as u64;
+        let offsets_len = n
+            .checked_add(1)
+            .and_then(|k| k.checked_mul(8))
+            .ok_or_else(|| malformed("Signal batch too long"))?;
+        let (offsets_pos, _) = body_buffer(3, offsets_len)?;
+        let (data_pos, data_len) = body_buffer(4, 0)?;
+        let (samples_pos, _) = body_buffer(6, n * 4)?;
 
-            // Read int64 offsets buffer (buffers[3]): (n_rows+1) × 8 bytes
-            let offsets_buf = buffers.get(3);
-            let samples_buf = buffers.get(6);
-            let data_buf = buffers.get(4);
-
-            let offsets_abs = body_start + offsets_buf.offset() as u64;
-            let samples_abs = body_start + samples_buf.offset() as u64;
-            let data_abs = body_start + data_buf.offset() as u64;
-
-            // Read the int64 offsets
-            guard.seek(SeekFrom::Start(offsets_abs))?;
-            let mut offsets_bytes = vec![0u8; (n_rows + 1) * 8];
-            guard.read_exact(&mut offsets_bytes)?;
-            let int64_offsets: Vec<i64> = offsets_bytes
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-
-            // Read the UInt32 num_samples
-            guard.seek(SeekFrom::Start(samples_abs))?;
-            let mut samples_bytes = vec![0u8; n_rows * 4];
-            guard.read_exact(&mut samples_bytes)?;
-            let num_samples_vec: Vec<u32> = samples_bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-
-            for i in 0..n_rows {
-                let file_offset = data_abs + int64_offsets[i] as u64;
-                let compressed_len = (int64_offsets[i + 1] - int64_offsets[i]) as u32;
-                let num_samples = num_samples_vec[i];
-                rows.push(LazySignalRow::Compressed {
-                    file_offset,
-                    compressed_len,
-                    num_samples,
-                });
+        let offsets: Vec<i64> = section
+            .read(offsets_pos, offsets_len)?
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let samples = section.read(samples_pos, n * 4)?;
+        for (i, w) in offsets.windows(2).enumerate() {
+            let (start, end) = (w[0], w[1]);
+            if start < 0 || end < start || end as u64 > data_len {
+                return Err(malformed("invalid Signal blob offsets"));
             }
-        } else {
-            // Uncompressed (LargeList<Int16>) buffer layout:
-            //   FixedSizeBinary(16): buffers[0] validity, buffers[1] data
-            //   LargeList<Int16>:    buffers[2] validity, buffers[3] list offsets, buffers[4] child validity, buffers[5] child data
-            //   UInt32:              buffers[6] validity, buffers[7] data
-            if buffers.len() < 6 {
-                return Err(Error::FlatBuffers(format!(
-                    "Uncompressed signal batch has only {} buffers (expected ≥6)",
-                    buffers.len()
-                )));
-            }
-
-            let list_offsets_buf = buffers.get(3);
-            let child_data_buf = buffers.get(5);
-
-            let list_offsets_abs = body_start + list_offsets_buf.offset() as u64;
-            let child_data_abs = body_start + child_data_buf.offset() as u64;
-
-            // Read the list int64 offsets
-            guard.seek(SeekFrom::Start(list_offsets_abs))?;
-            let mut offsets_bytes = vec![0u8; (n_rows + 1) * 8];
-            guard.read_exact(&mut offsets_bytes)?;
-            let list_offsets: Vec<i64> = offsets_bytes
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-
-            // Read the child Int16 data (all at once for this batch)
-            let total_samples = list_offsets[n_rows] as usize;
-            guard.seek(SeekFrom::Start(child_data_abs))?;
-            let mut child_bytes = vec![0u8; total_samples * 2];
-            guard.read_exact(&mut child_bytes)?;
-            let child_i16: Vec<i16> = child_bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-
-            for i in 0..n_rows {
-                let start = list_offsets[i] as usize;
-                let end = list_offsets[i + 1] as usize;
-                let samples: Box<[i16]> = child_i16[start..end].to_vec().into_boxed_slice();
-                rows.push(LazySignalRow::Uncompressed(samples));
-            }
+            rows.push(LazySignalRow {
+                file_offset: section.start + data_pos + start as u64,
+                compressed_len: u32::try_from(end - start)
+                    .map_err(|_| malformed("Signal blob too large"))?,
+                num_samples: u32::from_le_bytes(samples[i * 4..i * 4 + 4].try_into().unwrap()),
+            });
         }
     }
+    Ok(Some(rows))
+}
 
-    drop(guard);
-    Ok(SignalTable::Lazy { file, rows })
+/// Error if a table's `MINKNOW:file_identifier` schema metadata disagrees with the footer.
+pub(crate) fn check_file_identifier(table: &str, schema: &Schema, footer_id: &str) -> Result<()> {
+    check_file_identifier_value(
+        table,
+        schema
+            .metadata()
+            .get("MINKNOW:file_identifier")
+            .map(String::as_str),
+        footer_id,
+    )
+}
+
+fn check_file_identifier_value(
+    table: &str,
+    schema_id: Option<&str>,
+    footer_id: &str,
+) -> Result<()> {
+    match schema_id {
+        Some(id) if id != footer_id => Err(Error::FileIdentifierMismatch(
+            table.to_string(),
+            id.to_string(),
+            footer_id.to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 // ── Reads table ───────────────────────────────────────────────────────────────
@@ -511,6 +546,9 @@ pub(crate) fn parse_reads_batches(
 
         // Fixed columns
         let read_id_col = col!(batch, "read_id", FixedSizeBinaryArray)?;
+        if read_id_col.value_length() != 16 {
+            return Err(Error::TypeMismatch("read_id".into()));
+        }
         let read_number_col = col!(batch, "read_number", UInt32Array)?;
         let channel_col = ChannelCol::from_batch(batch)?;
         let well_col = col!(batch, "well", UInt8Array)?;

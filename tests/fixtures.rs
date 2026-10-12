@@ -96,3 +96,28 @@ fn rejects_legacy_version() {
         "{err}"
     );
 }
+
+#[test]
+fn reads_uncompressed_signal() {
+    // Signal stored as LargeList<Int16> instead of VBZ: Reader::open falls back to
+    // loading the Signal table eagerly.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/multi_fast5_zip_v7_uncompressed.pod5");
+    let lazy = Reader::open(&path).expect("open");
+    let eager = Reader::from_reader(&mut std::fs::File::open(&path).unwrap()).expect("from_reader");
+    for reader in [lazy, eager] {
+        assert_eq!(reader.len(), 3);
+        for r in reader.reads_iter() {
+            let e = EXPECTED
+                .iter()
+                .find(|e| e.read_id == r.read_id_str())
+                .expect("known read");
+            let signal = r.signal().expect("signal");
+            assert_eq!(signal.len() as u64, e.num_samples);
+            assert_eq!(signal.iter().map(|&s| s as i64).sum::<i64>(), e.signal_sum);
+            assert_eq!((signal[0], *signal.last().unwrap()), (e.first, e.last));
+        }
+        let par: Vec<_> = reader.par_reads_iter(2).collect::<Result<_, _>>().unwrap();
+        assert_eq!(par.len(), 3);
+    }
+}

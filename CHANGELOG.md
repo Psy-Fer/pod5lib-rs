@@ -8,6 +8,10 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Fixed
 
+- **Corrupt or truncated files could crash the calling program.** A single corrupted byte could cause a panic or an attempted allocation of hundreds of gigabytes, which aborts the process. Reading is now hardened against untrusted input: the footer parser is bounds-checked; footer, table and blob offsets and lengths are validated against the file before anything is allocated; sample counts are checked against the compressed data; Arrow IPC block tables are validated before `arrow` reads them; and panics inside `arrow` or the SVB16 decoder become errors. These all return the new `Error::Malformed` or an existing error variant. `tests/malformed.rs` checks thousands of corruptions on every run, and CI checks every single-byte corruption and truncation of a small file.
+- `Reader::open` (lazy signal) now checks the Signal table's `file_identifier` against the footer, as `Reader::from_reader` already did.
+- `Reader::open` now handles any valid Signal table layout: the fast path for upstream's standard layout (VBZ signal, columns `read_id, signal, samples`, no Arrow body compression) is unchanged, and anything else is loaded with the general parser instead of being misread.
+- A panic while decoding signal no longer leaves a lazily-opened `Reader` unusable (its file lock was poisoned). Signal is now decompressed after releasing the file lock.
 - **`end_reason` dictionary order:** writers now emit all ten known reasons in `pod5.EndReasonEnum` order, as upstream does, so each read's dictionary key equals its enum value. Before, the dictionary was built in first-seen order, so anything using the raw key (such as Python `ReadRecord.end_reason_index`) got the wrong reason.
 - `StreamingWriter::finish()` reported `WriterThreadDied` instead of the actual error (such as a full disk) when the writer thread failed.
 - Writers did not flush explicitly, so an error writing the end of the file could be lost.
@@ -21,6 +25,7 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Added
 
+- `Error::Malformed` for corrupt or truncated files.
 - `EndReason::from_reason_with_default_forced` and `EndReasonKind::default_forced`, matching Python `pod5`.
 - `Error::TooManyDictionaryValues`.
 - `StreamingWriter` implements `Debug`.

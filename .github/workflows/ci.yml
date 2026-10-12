@@ -75,6 +75,31 @@ jobs:
       - name: Tests
         run: cargo test
 
+  # Every single-byte corruption and truncation of a small POD5 file must give an
+  # error, not a panic or an oversized allocation (tests/malformed.rs). Too slow for
+  # the default debug test run, so it runs here in release mode.
+  malformed-input:
+    name: Malformed input (exhaustive)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-release-cargo-
+
+      - name: Exhaustive malformed-input test
+        run: cargo test --release --test malformed -- --include-ignored
+
   # Cross-check against upstream Python pod5: Rust reads must match Python field by
   # field, and files written by Rust must be readable by Python.
   python-interop:

@@ -30,74 +30,95 @@ struct Fb<'a> {
     buf: &'a [u8],
 }
 
+fn bad(what: &str) -> Error {
+    Error::FlatBuffers(format!("malformed footer: {what}"))
+}
+
+/// Every accessor is bounds-checked: the footer comes from an untrusted file.
 impl<'a> Fb<'a> {
-    #[inline]
-    fn u16_at(&self, pos: usize) -> u16 {
-        u16::from_le_bytes(self.buf[pos..pos + 2].try_into().unwrap())
+    fn bytes<const N: usize>(&self, pos: usize) -> Result<[u8; N]> {
+        pos.checked_add(N)
+            .and_then(|end| self.buf.get(pos..end))
+            .map(|b| b.try_into().unwrap())
+            .ok_or_else(|| bad("offset out of bounds"))
     }
-    #[inline]
-    fn u32_at(&self, pos: usize) -> u32 {
-        u32::from_le_bytes(self.buf[pos..pos + 4].try_into().unwrap())
+    fn u16_at(&self, pos: usize) -> Result<u16> {
+        self.bytes(pos).map(u16::from_le_bytes)
     }
-    #[inline]
-    fn i32_at(&self, pos: usize) -> i32 {
-        i32::from_le_bytes(self.buf[pos..pos + 4].try_into().unwrap())
+    fn u32_at(&self, pos: usize) -> Result<u32> {
+        self.bytes(pos).map(u32::from_le_bytes)
     }
-    #[inline]
-    fn i64_at(&self, pos: usize) -> i64 {
-        i64::from_le_bytes(self.buf[pos..pos + 8].try_into().unwrap())
+    fn i32_at(&self, pos: usize) -> Result<i32> {
+        self.bytes(pos).map(i32::from_le_bytes)
     }
-    #[inline]
-    fn i16_at(&self, pos: usize) -> i16 {
-        i16::from_le_bytes(self.buf[pos..pos + 2].try_into().unwrap())
+    fn i64_at(&self, pos: usize) -> Result<i64> {
+        self.bytes(pos).map(i64::from_le_bytes)
+    }
+    fn i16_at(&self, pos: usize) -> Result<i16> {
+        self.bytes(pos).map(i16::from_le_bytes)
     }
 
     /// Dereference a forward `uoffset_t`: returns the target absolute position.
-    #[inline]
-    fn follow_u(&self, pos: usize) -> usize {
-        pos + self.u32_at(pos) as usize
+    fn follow_u(&self, pos: usize) -> Result<usize> {
+        pos.checked_add(self.u32_at(pos)? as usize)
+            .filter(|&p| p < self.buf.len())
+            .ok_or_else(|| bad("offset out of bounds"))
     }
 
     /// Absolute position of the root table.
-    fn root(&self) -> usize {
-        self.u32_at(0) as usize
+    fn root(&self) -> Result<usize> {
+        self.follow_u(0)
     }
 
     /// Absolute position of a field in a table, or `None` if absent/default.
-    fn field(&self, table: usize, id: usize) -> Option<usize> {
+    fn field(&self, table: usize, id: usize) -> Result<Option<usize>> {
         // soffset at start of table points backwards to the vtable
-        let soffset = self.i32_at(table);
-        let vtable = (table as i64 - soffset as i64) as usize;
-        let vt_size = self.u16_at(vtable) as usize;
+        let soffset = self.i32_at(table)? as i64;
+        let vtable = usize::try_from(table as i64 - soffset).map_err(|_| bad("bad vtable"))?;
+        let vt_size = self.u16_at(vtable)? as usize;
         let entry = vtable + 4 + id * 2;
         if entry + 2 > vtable + vt_size {
-            return None;
+            return Ok(None);
         }
-        let offset = self.u16_at(entry) as usize;
-        if offset == 0 {
-            None
-        } else {
-            Some(table + offset)
+        match self.u16_at(entry)? as usize {
+            0 => Ok(None),
+            offset => Ok(Some(table + offset)),
         }
     }
 
     /// Dereference a string field (field_pos → uoffset → length-prefixed UTF-8).
     fn string_at(&self, field_pos: usize) -> Result<&'a str> {
-        let s = self.follow_u(field_pos);
-        let len = self.u32_at(s) as usize;
-        std::str::from_utf8(&self.buf[s + 4..s + 4 + len]).map_err(Error::Utf8)
+        let s = self.follow_u(field_pos)?;
+        let len = self.u32_at(s)? as usize;
+        let bytes = (s + 4)
+            .checked_add(len)
+            .and_then(|end| self.buf.get(s + 4..end))
+            .ok_or_else(|| bad("string out of bounds"))?;
+        std::str::from_utf8(bytes).map_err(Error::Utf8)
     }
 
-    /// Dereference a vector field → `(vector_start, element_count)`.
-    fn vector_at(&self, field_pos: usize) -> (usize, usize) {
-        let v = self.follow_u(field_pos);
-        (v, self.u32_at(v) as usize)
+    /// Dereference a vector field → `(vector_start, element_count)`. The count is
+    /// checked against the buffer so it cannot drive a huge allocation.
+    fn vector_at(&self, field_pos: usize) -> Result<(usize, usize)> {
+        let v = self.follow_u(field_pos)?;
+        let count = self.u32_at(v)? as usize;
+        if count > (self.buf.len() - v - 4) / 4 {
+            return Err(bad("vector length out of bounds"));
+        }
+        Ok((v, count))
     }
 
     /// Table at index `i` inside a vector of tables.
-    fn vector_table(&self, vec_start: usize, i: usize) -> usize {
-        let ref_pos = vec_start + 4 + i * 4;
-        self.follow_u(ref_pos)
+    fn vector_table(&self, vec_start: usize, i: usize) -> Result<usize> {
+        self.follow_u(vec_start + 4 + i * 4)
+    }
+
+    /// Optional string field of `table`; empty if absent.
+    fn opt_string(&self, table: usize, id: usize) -> Result<String> {
+        Ok(match self.field(table, id)? {
+            Some(p) => self.string_at(p)?.to_owned(),
+            None => String::new(),
+        })
     }
 }
 
@@ -147,49 +168,27 @@ pub(crate) fn parse(data: &[u8]) -> Result<Footer> {
         return Err(Error::FlatBuffers("buffer too short".into()));
     }
     let fb = Fb { buf: data };
-    let root = fb.root();
+    let root = fb.root()?;
 
-    let file_identifier = fb
-        .field(root, 0)
-        .map(|p| fb.string_at(p))
-        .transpose()?
-        .unwrap_or("")
-        .to_owned();
+    let file_identifier = fb.opt_string(root, 0)?;
+    let software = fb.opt_string(root, 1)?;
+    let pod5_version = fb.opt_string(root, 2)?;
 
-    let software = fb
-        .field(root, 1)
-        .map(|p| fb.string_at(p))
-        .transpose()?
-        .unwrap_or("")
-        .to_owned();
-
-    let pod5_version = fb
-        .field(root, 2)
-        .map(|p| fb.string_at(p))
-        .transpose()?
-        .unwrap_or("")
-        .to_owned();
-
-    let contents = match fb.field(root, 3) {
-        None => Vec::new(),
-        Some(contents_pos) => {
-            let (vec_start, count) = fb.vector_at(contents_pos);
-            (0..count)
-                .map(|i| {
-                    let tbl = fb.vector_table(vec_start, i);
-                    let offset = fb.field(tbl, 0).map(|p| fb.i64_at(p)).unwrap_or(0);
-                    let length = fb.field(tbl, 1).map(|p| fb.i64_at(p)).unwrap_or(0);
-                    let content_type =
-                        ContentType::from_i16(fb.field(tbl, 3).map(|p| fb.i16_at(p)).unwrap_or(0));
-                    EmbeddedFile {
-                        offset,
-                        length,
-                        content_type,
-                    }
-                })
-                .collect()
+    let mut contents = Vec::new();
+    if let Some(contents_pos) = fb.field(root, 3)? {
+        let (vec_start, count) = fb.vector_at(contents_pos)?;
+        for i in 0..count {
+            let tbl = fb.vector_table(vec_start, i)?;
+            let get_i64 =
+                |id| -> Result<i64> { fb.field(tbl, id)?.map_or(Ok(0), |p| fb.i64_at(p)) };
+            let content_type = fb.field(tbl, 3)?.map_or(Ok(0), |p| fb.i16_at(p))?;
+            contents.push(EmbeddedFile {
+                offset: get_i64(0)?,
+                length: get_i64(1)?,
+                content_type: ContentType::from_i16(content_type),
+            });
         }
-    };
+    }
 
     Ok(Footer {
         file_identifier,

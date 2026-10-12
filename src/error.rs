@@ -89,6 +89,11 @@ pub enum Error {
     #[error("too many distinct values for dictionary column '{0}' (limit 32768)")]
     TooManyDictionaryValues(&'static str),
 
+    /// The file is corrupt or truncated: an offset, length or count read from it is
+    /// inconsistent with the file, or the data could not be decoded.
+    #[error("malformed POD5 file: {0}")]
+    Malformed(String),
+
     /// The background writer thread exited before the file was complete.
     #[error("writer thread exited unexpectedly")]
     WriterThreadDied,

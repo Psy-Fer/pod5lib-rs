@@ -11,7 +11,11 @@ repository. They are © Oxford Nanopore Technologies PLC and licensed under the
 pod5 merge multi_fast5_zip_v6.pod5 -o multi_fast5_zip_v7.pod5
 ```
 
-Every file holds the same 10 reads; the number is the Reads-table schema version.
+`multi_fast5_zip_v7_uncompressed.pod5` holds the 3 shortest reads of the v7 file,
+written by pod5 0.3.49's Python `Writer` with
+`signal_compression_type=SignalType.UncompressedSignal`.
+
+Every `multi_fast5_zip_v{N}.pod5` file holds the same 10 reads; N is the Reads-table schema version.
 
 | File | Reads table | Footer `pod5_version` | Used for |
 |---|---|---|---|
@@ -21,5 +25,6 @@ Every file holds the same 10 reads; the number is the Reads-table schema version
 | `multi_fast5_zip_v5.pod5` | V5 | 0.3.45 | Reading |
 | `multi_fast5_zip_v6.pod5` | V6 (`channel` as `UInt32`) | 0.3.46 | Reading |
 | `multi_fast5_zip_v7.pod5` | V7 (`channel_32bit`) | 0.3.49 | Reading; default input for parity scripts |
+| `multi_fast5_zip_v7_uncompressed.pod5` | V7, signal uncompressed (`LargeList<Int16>`) | 0.3.49 | Uncompressed-signal reading (3 shortest reads only) |
 
 These files and `tests/fixtures.rs` are excluded from the published crate (see `exclude` in `Cargo.toml`).

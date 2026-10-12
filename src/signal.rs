@@ -11,13 +11,17 @@
 ///   [zstd-compressed SVB stream...]  (no separate length header; Arrow `samples` column carries N)
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow::array::{Array, Int16Array, LargeBinaryArray, LargeListArray};
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
 use crate::{Error, Result};
+
+/// Upper bound on samples reserved up front when concatenating signal rows. Counts
+/// come from the file, so larger outputs grow as data is actually decoded.
+const MAX_PREALLOC_SAMPLES: usize = 1 << 24;
 
 // ── Signal table ─────────────────────────────────────────────────────────────
 
@@ -41,20 +45,16 @@ pub(crate) enum SignalTable {
     },
 }
 
-/// One row in the lazy signal table.
+/// One row in the lazy signal table: a VBZ blob at a known file position.
+/// (Uncompressed signal tables are loaded eagerly instead.)
 #[derive(Debug)]
-pub(crate) enum LazySignalRow {
-    /// VBZ-compressed blob stored at a specific file position.
-    Compressed {
-        /// Absolute byte position of the compressed blob within the .pod5 file.
-        file_offset: u64,
-        /// Length of the compressed blob in bytes.
-        compressed_len: u32,
-        /// Number of ADC samples after decompression.
-        num_samples: u32,
-    },
-    /// Eagerly materialized uncompressed samples (legacy LargeList<Int16> format).
-    Uncompressed(Box<[i16]>),
+pub(crate) struct LazySignalRow {
+    /// Absolute byte position of the compressed blob within the .pod5 file.
+    pub file_offset: u64,
+    /// Length of the compressed blob in bytes.
+    pub compressed_len: u32,
+    /// Number of ADC samples after decompression.
+    pub num_samples: u32,
 }
 
 /// Lightweight pointer into one row of one Arrow batch (used by Eager variant).
@@ -79,45 +79,9 @@ impl SignalTable {
     pub fn samples_for_rows(&self, indices: &[u64]) -> Result<Vec<i16>> {
         match self {
             SignalTable::Lazy { file, rows } => {
-                let total: usize = indices
-                    .iter()
-                    .map(|&i| match rows.get(i as usize) {
-                        Some(LazySignalRow::Compressed { num_samples, .. }) => {
-                            *num_samples as usize
-                        }
-                        Some(LazySignalRow::Uncompressed(s)) => s.len(),
-                        None => 0,
-                    })
-                    .sum();
-                let mut out = Vec::with_capacity(total);
-
-                let mut guard = file
-                    .lock()
-                    .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
-
-                for &idx in indices {
-                    let row = rows
-                        .get(idx as usize)
-                        .ok_or(Error::SignalRowOutOfRange(idx, rows.len()))?;
-
-                    match row {
-                        LazySignalRow::Compressed {
-                            file_offset,
-                            compressed_len,
-                            num_samples,
-                        } => {
-                            guard.seek(SeekFrom::Start(*file_offset))?;
-                            let mut blob = vec![0u8; *compressed_len as usize];
-                            guard.read_exact(&mut blob)?;
-                            let mut chunk = decompress_vbz(&blob, *num_samples as usize)?;
-                            out.append(&mut chunk);
-                        }
-                        LazySignalRow::Uncompressed(samples) => {
-                            out.extend_from_slice(samples);
-                        }
-                    }
-                }
-                Ok(out)
+                // Read the blobs under the lock, decompress after releasing it.
+                let blobs = read_lazy_blobs(file, rows, indices)?;
+                decompress_raw_blobs(&blobs)
             }
 
             SignalTable::Eager { batches, index } => {
@@ -125,7 +89,7 @@ impl SignalTable {
                     .iter()
                     .map(|&i| index.get(i as usize).map_or(0, |r| r.num_samples as usize))
                     .sum();
-                let mut out = Vec::with_capacity(total);
+                let mut out = Vec::with_capacity(total.min(MAX_PREALLOC_SAMPLES));
 
                 for &idx in indices {
                     let row = index
@@ -183,35 +147,11 @@ impl SignalTable {
             SignalTable::Lazy { file, rows } => {
                 // I/O pass: read all compressed blobs under a single lock acquisition.
                 let all_blobs: Vec<Vec<RawSignalBlob>> = {
-                    let mut guard = file
-                        .lock()
-                        .map_err(|_| Error::Vbz("signal file mutex poisoned".into()))?;
-                    let mut result = Vec::with_capacity(batch_row_indices.len());
-                    for indices in batch_row_indices {
-                        let mut read_blobs = Vec::with_capacity(indices.len());
-                        for &idx in *indices {
-                            let row = rows
-                                .get(idx as usize)
-                                .ok_or(Error::SignalRowOutOfRange(idx, rows.len()))?;
-                            match row {
-                                LazySignalRow::Compressed {
-                                    file_offset,
-                                    compressed_len,
-                                    num_samples,
-                                } => {
-                                    guard.seek(SeekFrom::Start(*file_offset))?;
-                                    let mut blob = vec![0u8; *compressed_len as usize];
-                                    guard.read_exact(&mut blob)?;
-                                    read_blobs.push(RawSignalBlob::Compressed(blob, *num_samples));
-                                }
-                                LazySignalRow::Uncompressed(s) => {
-                                    read_blobs.push(RawSignalBlob::Uncompressed(s.clone()));
-                                }
-                            }
-                        }
-                        result.push(read_blobs);
-                    }
-                    result
+                    let mut guard = lock_file(file);
+                    batch_row_indices
+                        .iter()
+                        .map(|indices| read_blobs_locked(&mut guard, rows, indices))
+                        .collect::<Result<_>>()?
                 };
                 // Decompress pass: fully parallel, lock already released.
                 pool.install(|| {
@@ -234,33 +174,58 @@ impl SignalTable {
     }
 }
 
-// ── Raw blob type (parallel read pipeline) ────────────────────────────────────
-
-/// Intermediate representation used by the parallel read path: a compressed or
-/// uncompressed signal blob for one signal-table row, gathered before decompression.
-enum RawSignalBlob {
-    Compressed(Vec<u8>, u32),
-    Uncompressed(Box<[i16]>),
+/// Lock the signal file. A panic while it was held cannot leave it inconsistent
+/// (every read seeks first), so a poisoned lock is recovered.
+fn lock_file(file: &Mutex<File>) -> MutexGuard<'_, File> {
+    file.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Decompress (or copy) a single read's raw blobs into a flat `i16` sample vector.
-fn decompress_raw_blobs(blobs: &[RawSignalBlob]) -> Result<Vec<i16>> {
-    let total: usize = blobs
+fn read_lazy_blobs(
+    file: &Mutex<File>,
+    rows: &[LazySignalRow],
+    indices: &[u64],
+) -> Result<Vec<RawSignalBlob>> {
+    read_blobs_locked(&mut lock_file(file), rows, indices)
+}
+
+/// Read the raw (still compressed) blobs for `indices` from the locked file.
+fn read_blobs_locked(
+    file: &mut File,
+    rows: &[LazySignalRow],
+    indices: &[u64],
+) -> Result<Vec<RawSignalBlob>> {
+    indices
         .iter()
-        .map(|b| match b {
-            RawSignalBlob::Compressed(_, n) => *n as usize,
-            RawSignalBlob::Uncompressed(s) => s.len(),
+        .map(|&idx| {
+            let row = rows
+                .get(idx as usize)
+                .ok_or(Error::SignalRowOutOfRange(idx, rows.len()))?;
+            // Offsets and lengths were checked against the section when parsed.
+            file.seek(SeekFrom::Start(row.file_offset))?;
+            let mut blob = vec![0u8; row.compressed_len as usize];
+            file.read_exact(&mut blob)?;
+            Ok(RawSignalBlob {
+                blob,
+                num_samples: row.num_samples,
+            })
         })
-        .sum();
-    let mut out = Vec::with_capacity(total);
-    for blob in blobs {
-        match blob {
-            RawSignalBlob::Compressed(data, n) => {
-                let mut chunk = decompress_vbz(data, *n as usize)?;
-                out.append(&mut chunk);
-            }
-            RawSignalBlob::Uncompressed(s) => out.extend_from_slice(s),
-        }
+        .collect()
+}
+
+// ── Raw blob type (parallel read pipeline) ────────────────────────────────────
+
+/// One signal row's VBZ blob, read from the file but not yet decompressed.
+struct RawSignalBlob {
+    blob: Vec<u8>,
+    num_samples: u32,
+}
+
+/// Decompress a single read's raw blobs into a flat `i16` sample vector.
+fn decompress_raw_blobs(blobs: &[RawSignalBlob]) -> Result<Vec<i16>> {
+    let total: usize = blobs.iter().map(|b| b.num_samples as usize).sum();
+    let mut out = Vec::with_capacity(total.min(MAX_PREALLOC_SAMPLES));
+    for b in blobs {
+        out.append(&mut decompress_vbz(&b.blob, b.num_samples as usize)?);
     }
     Ok(out)
 }
@@ -285,16 +250,37 @@ pub(crate) fn compress_vbz(samples: &[i16]) -> crate::Result<Vec<u8>> {
 ///
 /// The blob is a raw zstd frame; after zstd decompression the payload is
 /// SVB16 + zigzag-delta encoded i16 values.
+///
+/// `num_samples` comes from the file, so it is checked against the size declared
+/// in the zstd frame header before any buffer is sized from it.
 pub(crate) fn decompress_vbz(data: &[u8], num_samples: usize) -> Result<Vec<i16>> {
     if num_samples == 0 {
         return Ok(Vec::new());
     }
-    let svb_cap = num_samples / 8 + 1 + num_samples * 2;
+    // An SVB16 stream of N values is ceil(N/8) control bytes plus N..=2N data bytes.
+    let ctrl = num_samples.div_ceil(8);
+    let svb_range = (ctrl + num_samples)..=(ctrl + 2 * num_samples);
+    let svb_len = match zstd::zstd_safe::get_frame_content_size(data) {
+        Ok(Some(n)) if usize::try_from(n).is_ok_and(|n| svb_range.contains(&n)) => n as usize,
+        Ok(Some(n)) => {
+            return Err(Error::Vbz(format!(
+                "compressed blob holds {n} bytes, inconsistent with {num_samples} samples"
+            )));
+        }
+        // Upstream and this crate always record the content size; fall back to the
+        // largest valid size for blobs that don't.
+        Ok(None) => *svb_range.end(),
+        Err(_) => return Err(Error::Vbz("invalid zstd frame".into())),
+    };
     let svb_data =
-        zstd::bulk::decompress(data, svb_cap).map_err(|e| Error::Vbz(format!("zstd: {e}")))?;
+        zstd::bulk::decompress(data, svb_len).map_err(|e| Error::Vbz(format!("zstd: {e}")))?;
     let mut out = Vec::with_capacity(num_samples);
-    svb::decode_vbz_fused_into(&svb_data, num_samples, &mut out)
-        .map_err(|e| Error::Vbz(format!("fused decode: {e}")))?;
+    // svb indexes its input directly; a panic on a malformed stream becomes an error.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        svb::decode_vbz_fused_into(&svb_data, num_samples, &mut out)
+    }))
+    .map_err(|_| Error::Vbz("malformed SVB16 stream".into()))?
+    .map_err(|e| Error::Vbz(format!("fused decode: {e}")))?;
     Ok(out)
 }
 
@@ -477,21 +463,5 @@ mod tests {
         };
         let err = table.samples_for_rows(&[0]).unwrap_err();
         assert!(matches!(err, crate::Error::SignalRowOutOfRange(0, 0)));
-    }
-
-    #[test]
-    fn lazy_uncompressed_row() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("pod5_signal_test_uncomp.tmp");
-        std::fs::write(&path, b"\0").unwrap();
-        let f = File::open(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let samples: Box<[i16]> = vec![10i16, 20, 30].into_boxed_slice();
-        let table = SignalTable::Lazy {
-            file: Arc::new(Mutex::new(f)),
-            rows: vec![LazySignalRow::Uncompressed(samples)],
-        };
-        let result = table.samples_for_rows(&[0]).unwrap();
-        assert_eq!(result, vec![10i16, 20, 30]);
     }
 }

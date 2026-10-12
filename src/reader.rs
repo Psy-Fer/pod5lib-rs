@@ -5,8 +5,6 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::Schema;
-
 use crate::footer::{self, ContentType, Footer};
 use crate::format::{
     FOOTER_LEN_FIELD_FROM_END, FOOTER_MAGIC, MIN_POD5_VERSION, SECTION_MARKER_LEN, SIGNATURE,
@@ -83,6 +81,13 @@ impl Reader {
 
         // ── 3. Locate footer from end of file ─────────────────────────────
         let file_size = reader.seek(SeekFrom::End(0))?;
+        // Opening signature + marker, footer magic, then footer_len + marker + signature.
+        let min_size = (8 + SECTION_MARKER_LEN + 8) as u64 + FOOTER_LEN_FIELD_FROM_END;
+        if file_size < min_size {
+            return Err(Error::Malformed(format!(
+                "file too short ({file_size} bytes)"
+            )));
+        }
 
         // Verify closing signature
         reader.seek(SeekFrom::Start(file_size - 8))?;
@@ -103,9 +108,15 @@ impl Reader {
         reader.seek(SeekFrom::Start(file_size - FOOTER_LEN_FIELD_FROM_END))?;
         let mut len_buf = [0u8; 8];
         reader.read_exact(&mut len_buf)?;
-        let footer_len = i64::from_le_bytes(len_buf) as u64;
+        let footer_len = i64::from_le_bytes(len_buf);
 
-        // Footer FlatBuffer starts at: file_size - FOOTER_LEN_FIELD_FROM_END - padded_len
+        // Footer FlatBuffer starts at: file_size - FOOTER_LEN_FIELD_FROM_END - padded_len,
+        // and must leave room for the footer magic and the opening signature + marker.
+        let room = file_size - min_size;
+        let footer_len = u64::try_from(footer_len)
+            .ok()
+            .filter(|&len| align8(len) <= room)
+            .ok_or_else(|| Error::Malformed(format!("invalid footer length {footer_len}")))?;
         let padded = align8(footer_len);
         let footer_fb_start = file_size - FOOTER_LEN_FIELD_FROM_END - padded;
 
@@ -132,19 +143,26 @@ impl Reader {
         }
 
         // ── 5. Locate required tables ─────────────────────────────────────
-        let find = |ct: ContentType| -> Option<(u64, u64)> {
-            footer
+        // Offsets and lengths come from the file: check them before allocating.
+        let find = |ct: ContentType, name: &'static str| -> Result<(u64, u64)> {
+            let f = footer
                 .contents
                 .iter()
                 .find(|f| f.content_type == ct)
-                .map(|f| (f.offset as u64, f.length as u64))
+                .ok_or(Error::MissingTable(name))?;
+            match (u64::try_from(f.offset), u64::try_from(f.length)) {
+                (Ok(off), Ok(len)) if off.checked_add(len).is_some_and(|end| end <= file_size) => {
+                    Ok((off, len))
+                }
+                _ => Err(Error::Malformed(format!(
+                    "{name} section (offset {}, length {}) lies outside the file",
+                    f.offset, f.length
+                ))),
+            }
         };
-        let (reads_off, reads_len) =
-            find(ContentType::ReadsTable).ok_or(Error::MissingTable("ReadsTable"))?;
-        let (signal_off, signal_len) =
-            find(ContentType::SignalTable).ok_or(Error::MissingTable("SignalTable"))?;
-        let (runinfo_off, runinfo_len) =
-            find(ContentType::RunInfoTable).ok_or(Error::MissingTable("RunInfoTable"))?;
+        let (reads_off, reads_len) = find(ContentType::ReadsTable, "ReadsTable")?;
+        let (signal_off, signal_len) = find(ContentType::SignalTable, "SignalTable")?;
+        let (runinfo_off, runinfo_len) = find(ContentType::RunInfoTable, "RunInfoTable")?;
 
         // ── 6. Load RunInfo and Reads Arrow IPC sections ──────────────────
         let (run_info_schema, run_info_batches) =
@@ -152,8 +170,8 @@ impl Reader {
         let (reads_schema, reads_batches) = tables::read_ipc_section(reader, reads_off, reads_len)?;
 
         // Cross-validate MINKNOW:file_identifier between footer and RunInfo/Reads schemas.
-        check_file_identifier("RunInfo", &run_info_schema, &footer.file_identifier)?;
-        check_file_identifier("Reads", &reads_schema, &footer.file_identifier)?;
+        tables::check_file_identifier("RunInfo", &run_info_schema, &footer.file_identifier)?;
+        tables::check_file_identifier("Reads", &reads_schema, &footer.file_identifier)?;
 
         Ok(ParsedTables {
             footer,
@@ -201,6 +219,7 @@ impl Reader {
             Arc::clone(&file),
             signal_off,
             signal_len,
+            &pt.footer.file_identifier,
         )?);
         Self::finish(pt, signal_table)
     }
@@ -214,7 +233,7 @@ impl Reader {
             tables::read_ipc_section(reader, pt.signal_off, pt.signal_len)?;
 
         // Cross-validate Signal table file_identifier for the eager path.
-        check_file_identifier("Signal", &signal_schema, &pt.footer.file_identifier)?;
+        tables::check_file_identifier("Signal", &signal_schema, &pt.footer.file_identifier)?;
 
         let signal_table = Arc::new(tables::parse_signal_batches(signal_batches)?);
         Self::finish(pt, signal_table)
@@ -324,18 +343,6 @@ impl Reader {
     /// fields missing from older tables are NaN.
     pub fn reads_table_version(&self) -> u8 {
         self.reads_table_version
-    }
-}
-
-/// Error if a table's `MINKNOW:file_identifier` schema metadata disagrees with the footer.
-fn check_file_identifier(table: &str, schema: &Schema, footer_id: &str) -> Result<()> {
-    match schema.metadata().get("MINKNOW:file_identifier") {
-        Some(schema_id) if schema_id != footer_id => Err(Error::FileIdentifierMismatch(
-            table.to_string(),
-            schema_id.clone(),
-            footer_id.to_string(),
-        )),
-        _ => Ok(()),
     }
 }
 
