@@ -416,6 +416,22 @@ mod tests {
     }
 
     #[test]
+    fn decompress_vbz_truncated_svb_stream() {
+        // Control bytes claim 2 data bytes per value, but only 1 per value is present.
+        // The total length is plausible, so this reaches the SVB16 decoder, which must
+        // return an error (svb < 0.3 over-read its stack buffer or panicked here).
+        for n in [64usize, 67] {
+            let mut svb_stream = vec![0xFFu8; n.div_ceil(8)];
+            svb_stream.extend(std::iter::repeat_n(0u8, n + 3));
+            let blob = zstd::bulk::compress(&svb_stream, 0).unwrap();
+            assert!(
+                matches!(decompress_vbz(&blob, n), Err(Error::Vbz(_))),
+                "n = {n}"
+            );
+        }
+    }
+
+    #[test]
     fn decompress_vbz_bad_input() {
         let result = decompress_vbz(b"not-a-zstd-frame", 1);
         assert!(matches!(result, Err(crate::Error::Vbz(_))));

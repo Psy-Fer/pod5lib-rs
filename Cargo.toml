@@ -23,7 +23,7 @@ path = "src/lib.rs"
 # Apache Arrow IPC reading (Reads/Signal/RunInfo tables are Arrow IPC / Feather v2)
 arrow = { version = "53", default-features = false, features = ["ipc"] }
 # SVB16 / delta / zigzag with SIMD acceleration (replaces internal scalar VBZ codec)
-svb = { version = "0.1", features = ["simd-auto"] }
+svb = { version = "0.3.1", features = ["simd-auto"] }
 # Signal decompression: VBZ = delta+zigzag+SVB16+zstd
 zstd = { version = "0.13", default-features = false }
 # Parallel VBZ compression
