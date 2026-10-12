@@ -47,8 +47,6 @@ fn main() {
 
     let mut writer = Writer::new();
     writer.file_identifier = reader.file_identifier().to_string();
-    writer.software = "pod5-rs write_pod5 example".to_string();
-    writer.pod5_version = reader.pod5_version().to_string();
 
     let n = n_take.min(reader.len());
     for read in reader.reads_iter().take(n) {

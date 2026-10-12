@@ -63,5 +63,11 @@ pub use types::{
 };
 pub use writer::{DEFAULT_SIGNAL_BATCH_SIZE, StreamingWriter, Writer};
 
+/// Version of the upstream Python/C++ `pod5` library this crate is validated against.
+///
+/// Writers record it as the file's `pod5_version` (which upstream parses to decide
+/// on migrations) and in the default `software` string.
+pub const POD5_COMPAT_VERSION: &str = "0.3.49";
+
 /// Crate-wide `Result` type, equivalent to `std::result::Result<T, `[`Error`]`>`.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -36,7 +36,7 @@ pod5 = { git = "https://github.com/Psy-Fer/pod5lib-rs" }
 ## Quick example
 
 ```rust,no_run
-use pod5::Reader;
+use pod5lib::Reader;
 
 let reader = Reader::open("sample.pod5")?;
 println!("{} reads", reader.len());
@@ -46,7 +46,7 @@ for read in reader.reads_iter() {
     let pa  = read.signal_pa()?;     // calibrated picoamps
     println!("{}: {} samples", read.read_id_str(), adc.len());
 }
-# Ok::<(), pod5::Error>(())
+# Ok::<(), pod5lib::Error>(())
 ```
 
 ## API overview

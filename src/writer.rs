@@ -19,12 +19,12 @@ use arrow::record_batch::RecordBatch;
 
 use rayon::prelude::*;
 
-use crate::Result;
 use crate::error::Error;
 use crate::footer;
 use crate::format::{FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8};
 use crate::signal::compress_vbz;
 use crate::types::{ReadRecord, RunInfo};
+use crate::{POD5_COMPAT_VERSION, Result};
 
 /// Number of in-flight reads buffered between caller and writer thread.
 /// Bounds peak RSS to roughly CHANNEL_DEPTH × avg-VBZ-bytes-per-read.
@@ -155,7 +155,6 @@ enum WriterState {
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = Writer::new();
 /// writer.file_identifier = reader.file_identifier().to_string();
-/// writer.pod5_version = reader.pod5_version().to_string();
 /// for read in reader.reads_iter().take(10) {
 ///     let signal = read.signal().unwrap();
 ///     writer.add_read(read.clone(), signal);
@@ -166,9 +165,13 @@ enum WriterState {
 pub struct Writer {
     /// file_identifier stored in the footer (should be a UUID string).
     pub file_identifier: String,
-    /// Software string recorded in the footer.
+    /// Software string recorded in the footer and schema metadata; free text, not
+    /// interpreted by readers. Defaults to `"pod5lib-rs <crate version> (pod5 <compat version>)"`.
     pub software: String,
-    /// POD5 spec version to record.
+    /// `pod5_version` recorded in the footer and schema metadata. Defaults to
+    /// [`POD5_COMPAT_VERSION`]. Upstream parses this, so it must be `X.Y.Z` and at
+    /// least `0.0.38`; writing fails with [`Error::InvalidPod5Version`] otherwise.
+    /// Don't copy it from a source file: the written Reads table is always V7.
     pub pod5_version: String,
     /// Number of reads per Arrow signal batch. Tune for write throughput vs. peak RSS.
     pub signal_batch_size: usize,
@@ -184,13 +187,13 @@ struct WriterRead {
 impl Writer {
     /// Create a new empty writer.
     ///
-    /// `software` and `pod5_version` are pre-filled from `Cargo.toml`;
+    /// `software` and `pod5_version` are pre-filled (see the field docs);
     /// set `file_identifier` before calling [`Writer::write_file`].
     pub fn new() -> Self {
         Self {
             file_identifier: String::new(),
-            software: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_string(),
-            pod5_version: env!("CARGO_PKG_VERSION").to_string(),
+            software: default_software(),
+            pod5_version: POD5_COMPAT_VERSION.to_string(),
             signal_batch_size: DEFAULT_SIGNAL_BATCH_SIZE,
             reads: Vec::new(),
         }
@@ -210,6 +213,7 @@ impl Writer {
 
     /// Write to any `Write` sink (useful for testing with `Vec<u8>`).
     pub fn write_to<W: Write>(&self, out: &mut W) -> Result<()> {
+        validate_pod5_version(&self.pod5_version)?;
         let cfg = WriterConfig {
             file_identifier: self.file_identifier.clone(),
             software: self.software.clone(),
@@ -241,7 +245,6 @@ impl Default for Writer {
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = StreamingWriter::create("output.pod5").unwrap();
 /// writer.file_identifier = reader.file_identifier().to_string();
-/// writer.pod5_version = reader.pod5_version().to_string();
 /// for read in reader.reads_iter() {
 ///     let signal = read.signal().unwrap();
 ///     writer.write_read(read, &signal).unwrap();
@@ -251,9 +254,13 @@ impl Default for Writer {
 pub struct StreamingWriter {
     /// file_identifier stored in the footer (should be a UUID string).
     pub file_identifier: String,
-    /// Software string recorded in the footer.
+    /// Software string recorded in the footer and schema metadata; free text, not
+    /// interpreted by readers. Defaults to `"pod5lib-rs <crate version> (pod5 <compat version>)"`.
     pub software: String,
-    /// POD5 spec version to record.
+    /// `pod5_version` recorded in the footer and schema metadata. Defaults to
+    /// [`POD5_COMPAT_VERSION`]. Upstream parses this, so it must be `X.Y.Z` and at
+    /// least `0.0.38`; writing fails with [`Error::InvalidPod5Version`] otherwise.
+    /// Don't copy it from a source file: the written Reads table is always V7.
     pub pod5_version: String,
     /// Number of reads per Arrow signal batch. Tune for write throughput vs. peak RSS.
     pub signal_batch_size: usize,
@@ -272,8 +279,8 @@ impl StreamingWriter {
         let file = File::create(path)?;
         Ok(Self {
             file_identifier: String::new(),
-            software: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_string(),
-            pod5_version: env!("CARGO_PKG_VERSION").to_string(),
+            software: default_software(),
+            pod5_version: POD5_COMPAT_VERSION.to_string(),
             signal_batch_size: DEFAULT_SIGNAL_BATCH_SIZE,
             channel_depth: CHANNEL_DEPTH,
             raw_buf: Vec::with_capacity(DEFAULT_SIGNAL_BATCH_SIZE),
@@ -283,6 +290,7 @@ impl StreamingWriter {
 
     /// Lazily start the writer thread, capturing the current config.
     fn start(&mut self) -> Result<()> {
+        validate_pod5_version(&self.pod5_version)?;
         let cfg = WriterConfig {
             file_identifier: self.file_identifier.clone(),
             software: self.software.clone(),
@@ -571,6 +579,30 @@ fn write_pod5_to_sink<W: Write>(
 }
 
 // ── Shared write helpers ──────────────────────────────────────────────────────
+
+fn default_software() -> String {
+    format!(
+        "pod5lib-rs {} (pod5 {POD5_COMPAT_VERSION})",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Reject `pod5_version` values that upstream `pod5` would refuse to open
+/// (not `X.Y.Z` of u16 parts) or would wrongly migrate (below 0.0.38).
+fn validate_pod5_version(v: &str) -> Result<()> {
+    let parts: Vec<Option<u16>> = v
+        .split('.')
+        .map(|p| {
+            (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| p.parse().ok())
+                .flatten()
+        })
+        .collect();
+    match parts[..] {
+        [Some(a), Some(b), Some(c)] if (a, b, c) >= (0, 0, 38) => Ok(()),
+        _ => Err(Error::InvalidPod5Version(v.to_string())),
+    }
+}
 
 fn make_ipc_meta(cfg: &WriterConfig) -> HashMap<String, String> {
     HashMap::from([
@@ -1110,4 +1142,40 @@ fn build_reads_ipc(
     )?;
 
     write_ipc(&schema, &[batch])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_pod5_version_is_valid() {
+        validate_pod5_version(POD5_COMPAT_VERSION).unwrap();
+    }
+
+    #[test]
+    fn pod5_version_validation() {
+        for ok in ["0.0.38", "0.3.49", "1.0.0", "65535.0.0"] {
+            assert!(validate_pod5_version(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "0.1",
+            "1.0.0.0",
+            "0.0.35",
+            "0.2.0-rc1",
+            "65536.0.0",
+            "1..0",
+            "+1.0.0",
+            " 1.0.0",
+        ] {
+            assert!(
+                matches!(
+                    validate_pod5_version(bad),
+                    Err(Error::InvalidPod5Version(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
 }

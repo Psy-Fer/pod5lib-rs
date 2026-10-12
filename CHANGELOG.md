@@ -13,11 +13,14 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Added
 
+- `POD5_COMPAT_VERSION` (`"0.3.49"`): the upstream `pod5` version this crate is validated against.
+- `Error::InvalidPod5Version`: writers now reject a `pod5_version` that upstream would refuse to open (not `X.Y.Z`) or would wrongly migrate (below `0.0.38`).
 - `ReadRecord::expected_open_pore_level` and `ReadRecord::selected_read_level` (Reads table V5), NaN when absent.
 - `Reader::reads_table_version()`: the Reads-table schema version stored in the file (3–7), equivalent to Python `Reader.physical_read_table_version`.
 
 ### Changed
 
+- Writer defaults: `pod5_version` is now `POD5_COMPAT_VERSION` (was the crate version), and `software` is `"pod5lib-rs <version> (pod5 <compat version>)"` (was `"pod5lib <version>"`).
 - **Breaking:** `Pore::channel` is now `u32`. It is read from `channel_32bit` when present, so channels above 65535 are preserved.
 - Writers now emit a V7 Reads table: adds `expected_open_pore_level`, `selected_read_level` and `channel_32bit`, while `channel` stays `UInt16` (0 when it does not fit in 16 bits). Older `pod5` versions still read these files and ignore the new columns.
 

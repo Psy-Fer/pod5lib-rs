@@ -212,7 +212,6 @@ fn writer_round_trip_read_ids() {
 
     let mut writer = pod5lib::Writer::new();
     writer.file_identifier = src.file_identifier().to_string();
-    writer.pod5_version = src.pod5_version().to_string();
     for read in src.reads_iter().take(n) {
         let signal = read.signal().expect("decompress");
         writer.add_read(read.clone(), signal);
@@ -244,7 +243,6 @@ fn writer_round_trip_signal() {
 
     let mut writer = pod5lib::Writer::new();
     writer.file_identifier = src.file_identifier().to_string();
-    writer.pod5_version = src.pod5_version().to_string();
     let orig_signals: Vec<Vec<i16>> = src
         .reads_iter()
         .take(n)
@@ -279,6 +277,23 @@ fn writer_empty_file() {
         dst.reads_table_version(),
         7,
         "writer should emit Reads table V7"
+    );
+    assert_eq!(dst.pod5_version(), pod5lib::POD5_COMPAT_VERSION);
+    assert!(
+        dst.software().starts_with("pod5lib-rs "),
+        "{}",
+        dst.software()
+    );
+}
+
+#[test]
+fn writer_rejects_invalid_pod5_version() {
+    let mut writer = pod5lib::Writer::new();
+    writer.pod5_version = "0.1".to_string();
+    let err = writer.write_to(&mut Vec::new()).unwrap_err();
+    assert!(
+        matches!(err, pod5lib::Error::InvalidPod5Version(_)),
+        "{err}"
     );
 }
 

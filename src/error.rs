@@ -59,6 +59,12 @@ pub enum Error {
     #[error("run_info column references unknown acquisition_id: '{0}'")]
     MissingRunInfo(String),
 
+    /// The writer's `pod5_version` is not a version upstream `pod5` accepts: it must be
+    /// `X.Y.Z` with each part ≤ 65535, and at least `0.0.38` (older values trigger an
+    /// on-open migration of legacy formats).
+    #[error("invalid pod5_version '{0}': expected X.Y.Z, at least 0.0.38")]
+    InvalidPod5Version(String),
+
     /// The background writer thread exited before the file was complete.
     #[error("writer thread exited unexpectedly")]
     WriterThreadDied,

@@ -107,5 +107,5 @@ Each table's Arrow schema carries `MINKNOW:*` metadata keys:
 | Key | Value |
 |---|---|
 | `MINKNOW:file_identifier` | File-level UUID (cross-validated with FlatBuffers footer) |
-| `MINKNOW:software` | Software string (set by the writer) |
-| `MINKNOW:pod5_version` | POD5 spec version |
+| `MINKNOW:software` | Free-text software string (set by the writer) |
+| `MINKNOW:pod5_version` | Writing `pod5` library version, `X.Y.Z`; upstream rejects files where it does not parse |
