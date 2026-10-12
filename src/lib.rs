@@ -37,7 +37,6 @@
 //!
 //! let src = Reader::open("input.pod5").unwrap();
 //! let mut writer = StreamingWriter::create("output.pod5").unwrap();
-//! writer.file_identifier = src.file_identifier().to_string();
 //!
 //! for read in src.reads_iter() {
 //!     let signal = read.signal().unwrap();

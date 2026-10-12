@@ -25,6 +25,7 @@ use crate::format::{FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8};
 use crate::signal::compress_vbz;
 use crate::types::{ReadRecord, RunInfo};
 use crate::{POD5_COMPAT_VERSION, Result};
+use uuid::Uuid;
 
 /// Number of in-flight reads buffered between caller and writer thread.
 /// Bounds peak RSS to roughly CHANNEL_DEPTH × avg-VBZ-bytes-per-read.
@@ -154,7 +155,6 @@ enum WriterState {
 ///
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = Writer::new();
-/// writer.file_identifier = reader.file_identifier().to_string();
 /// for read in reader.reads_iter().take(10) {
 ///     let signal = read.signal().unwrap();
 ///     writer.add_read(read.clone(), signal);
@@ -163,7 +163,12 @@ enum WriterState {
 /// ```
 #[derive(Debug)]
 pub struct Writer {
-    /// file_identifier stored in the footer (should be a UUID string).
+    /// UUID identifying the file, stored in the footer and schema metadata.
+    ///
+    /// Defaults to a fresh random (v4) UUID, as upstream `pod5` generates for every
+    /// new file. Any UUID form accepted by the `uuid` crate may be set; it is written
+    /// in canonical lowercase hyphenated form. Writing fails with
+    /// [`Error::InvalidFileIdentifier`] if it is not a UUID.
     pub file_identifier: String,
     /// Software string recorded in the footer and schema metadata; free text, not
     /// interpreted by readers. Defaults to `"pod5lib-rs <crate version> (pod5 <compat version>)"`.
@@ -187,11 +192,10 @@ struct WriterRead {
 impl Writer {
     /// Create a new empty writer.
     ///
-    /// `software` and `pod5_version` are pre-filled (see the field docs);
-    /// set `file_identifier` before calling [`Writer::write_file`].
+    /// `file_identifier`, `software` and `pod5_version` are pre-filled (see the field docs).
     pub fn new() -> Self {
         Self {
-            file_identifier: String::new(),
+            file_identifier: Uuid::new_v4().to_string(),
             software: default_software(),
             pod5_version: POD5_COMPAT_VERSION.to_string(),
             signal_batch_size: DEFAULT_SIGNAL_BATCH_SIZE,
@@ -215,7 +219,7 @@ impl Writer {
     pub fn write_to<W: Write>(&self, out: &mut W) -> Result<()> {
         validate_pod5_version(&self.pod5_version)?;
         let cfg = WriterConfig {
-            file_identifier: self.file_identifier.clone(),
+            file_identifier: canonical_file_identifier(&self.file_identifier)?,
             software: self.software.clone(),
             pod5_version: self.pod5_version.clone(),
             signal_batch_size: self.signal_batch_size,
@@ -244,7 +248,6 @@ impl Default for Writer {
 ///
 /// let reader = Reader::open("input.pod5").unwrap();
 /// let mut writer = StreamingWriter::create("output.pod5").unwrap();
-/// writer.file_identifier = reader.file_identifier().to_string();
 /// for read in reader.reads_iter() {
 ///     let signal = read.signal().unwrap();
 ///     writer.write_read(read, &signal).unwrap();
@@ -252,7 +255,12 @@ impl Default for Writer {
 /// writer.finish().unwrap();
 /// ```
 pub struct StreamingWriter {
-    /// file_identifier stored in the footer (should be a UUID string).
+    /// UUID identifying the file, stored in the footer and schema metadata.
+    ///
+    /// Defaults to a fresh random (v4) UUID, as upstream `pod5` generates for every
+    /// new file. Any UUID form accepted by the `uuid` crate may be set; it is written
+    /// in canonical lowercase hyphenated form. Writing fails with
+    /// [`Error::InvalidFileIdentifier`] if it is not a UUID.
     pub file_identifier: String,
     /// Software string recorded in the footer and schema metadata; free text, not
     /// interpreted by readers. Defaults to `"pod5lib-rs <crate version> (pod5 <compat version>)"`.
@@ -272,13 +280,13 @@ pub struct StreamingWriter {
 impl StreamingWriter {
     /// Open `path` for writing and return a new `StreamingWriter`.
     ///
-    /// Set `file_identifier` (and optionally `software`/`pod5_version`) before
-    /// the first call to [`Self::write_read`].  The background writer thread is
+    /// `file_identifier`, `software` and `pod5_version` are pre-filled; change them
+    /// before the first call to [`Self::write_read`].  The background writer thread is
     /// started lazily on the first write.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::create(path)?;
         Ok(Self {
-            file_identifier: String::new(),
+            file_identifier: Uuid::new_v4().to_string(),
             software: default_software(),
             pod5_version: POD5_COMPAT_VERSION.to_string(),
             signal_batch_size: DEFAULT_SIGNAL_BATCH_SIZE,
@@ -292,7 +300,7 @@ impl StreamingWriter {
     fn start(&mut self) -> Result<()> {
         validate_pod5_version(&self.pod5_version)?;
         let cfg = WriterConfig {
-            file_identifier: self.file_identifier.clone(),
+            file_identifier: canonical_file_identifier(&self.file_identifier)?,
             software: self.software.clone(),
             pod5_version: self.pod5_version.clone(),
             signal_batch_size: self.signal_batch_size,
@@ -585,6 +593,14 @@ fn default_software() -> String {
         "pod5lib-rs {} (pod5 {POD5_COMPAT_VERSION})",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+/// Parse `file_identifier` as a UUID and return its canonical hyphenated form,
+/// which upstream `pod5` requires.
+fn canonical_file_identifier(id: &str) -> Result<String> {
+    Uuid::try_parse(id)
+        .map(|u| u.hyphenated().to_string())
+        .map_err(|_| Error::InvalidFileIdentifier(id.to_string()))
 }
 
 /// Reject `pod5_version` values that upstream `pod5` would refuse to open
@@ -1151,6 +1167,36 @@ mod tests {
     #[test]
     fn default_pod5_version_is_valid() {
         validate_pod5_version(POD5_COMPAT_VERSION).unwrap();
+    }
+
+    #[test]
+    fn default_file_identifier_is_random_v4() {
+        let a = Writer::new().file_identifier;
+        let b = Writer::new().file_identifier;
+        assert_ne!(a, b);
+        assert_eq!(Uuid::parse_str(&a).unwrap().get_version_num(), 4);
+        assert_eq!(canonical_file_identifier(&a).unwrap(), a);
+    }
+
+    #[test]
+    fn file_identifier_canonicalised() {
+        assert_eq!(
+            canonical_file_identifier("{A1B2C3D4-0506-0708-090A-0B0C0D0E0F10}").unwrap(),
+            "a1b2c3d4-0506-0708-090a-0b0c0d0e0f10"
+        );
+        assert_eq!(
+            canonical_file_identifier("a1b2c3d405060708090a0b0c0d0e0f10").unwrap(),
+            "a1b2c3d4-0506-0708-090a-0b0c0d0e0f10"
+        );
+        for bad in ["", "not-a-uuid", "a1b2c3d4-0506-0708-090a-0b0c0d0e0f1"] {
+            assert!(
+                matches!(
+                    canonical_file_identifier(bad),
+                    Err(Error::InvalidFileIdentifier(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -155,7 +155,6 @@ fn run_write(path: &str, batch_size: Option<usize>, first_n: Option<usize>) -> B
 
     let t0 = Instant::now();
     let mut writer = StreamingWriter::create(out.to_str().unwrap()).expect("create writer failed");
-    writer.file_identifier = reader.file_identifier().to_string();
     writer.signal_batch_size = bs;
 
     let mut n = 0usize;

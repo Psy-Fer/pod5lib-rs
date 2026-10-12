@@ -44,7 +44,6 @@ use pod5lib::{Reader, Writer};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = Writer::new();
-writer.file_identifier = src.file_identifier().to_string();
 
 for read in src.reads_iter().take(10) {
     let signal = read.signal()?;
@@ -60,7 +59,6 @@ use pod5lib::{Reader, StreamingWriter};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = StreamingWriter::create("output.pod5")?;
-writer.file_identifier = src.file_identifier().to_string();
 
 for read in src.reads_iter() {
     let signal = read.signal()?;

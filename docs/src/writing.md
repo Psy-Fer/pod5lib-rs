@@ -12,7 +12,6 @@ use pod5lib::{Reader, Writer};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = Writer::new();
-writer.file_identifier = src.file_identifier().to_string();
 
 for read in src.reads_iter().take(10) {
     let signal = read.signal()?;
@@ -34,7 +33,6 @@ use pod5lib::{Reader, StreamingWriter};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = StreamingWriter::create("output.pod5")?;
-writer.file_identifier = src.file_identifier().to_string();
 
 for read in src.reads_iter() {
     let signal = read.signal()?;
@@ -54,7 +52,7 @@ Both writers expose the same public fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `file_identifier` | `""` | UUID string to embed in the file (copy from source file if rewriting) |
+| `file_identifier` | random v4 UUID | File UUID written to the footer and schema metadata. Upstream gives every new file a fresh one; any UUID form may be set, and it is written in canonical hyphenated form (`Error::InvalidFileIdentifier` if it is not a UUID) |
 | `software` | `"pod5lib-rs <version> (pod5 <compat>)"` | Free-text software string written to the footer and Arrow schema metadata; not interpreted by readers (Python: `Reader.writing_software`) |
 | `pod5_version` | `POD5_COMPAT_VERSION` | Upstream `pod5` version written to the footer and schema metadata. Upstream parses it: must be `X.Y.Z` and ≥ `0.0.38`, otherwise writing fails with `Error::InvalidPod5Version`. Don't copy it from a source file; the written Reads table is always V7 |
 
@@ -65,7 +63,6 @@ use pod5lib::{Reader, StreamingWriter};
 
 let src = Reader::open("input.pod5")?;
 let mut writer = StreamingWriter::create("output.pod5")?;
-writer.file_identifier = src.file_identifier().to_string();
 
 for read in src.reads_iter() {
     writer.write_read(read, &read.signal()?)?;

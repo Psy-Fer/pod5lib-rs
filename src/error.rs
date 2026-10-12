@@ -65,6 +65,10 @@ pub enum Error {
     #[error("invalid pod5_version '{0}': expected X.Y.Z, at least 0.0.38")]
     InvalidPod5Version(String),
 
+    /// The writer's `file_identifier` is not a UUID; upstream `pod5` refuses to open such files.
+    #[error("invalid file_identifier '{0}': expected a UUID")]
+    InvalidFileIdentifier(String),
+
     /// The background writer thread exited before the file was complete.
     #[error("writer thread exited unexpectedly")]
     WriterThreadDied,

@@ -46,7 +46,6 @@ fn main() {
     });
 
     let mut writer = Writer::new();
-    writer.file_identifier = reader.file_identifier().to_string();
 
     let n = n_take.min(reader.len());
     for read in reader.reads_iter().take(n) {

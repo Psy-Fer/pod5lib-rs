@@ -28,6 +28,8 @@ zstd = { version = "0.13", default-features = false }
 rayon = "1"
 # Error derivation
 thiserror = "2"
+# Random (v4) file_identifier generation, as upstream pod5 does for each new file
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Used only by examples/dump_pod5.rs for the Python parity test.

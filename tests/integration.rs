@@ -211,7 +211,6 @@ fn writer_round_trip_read_ids() {
     let n = 3.min(src.len());
 
     let mut writer = pod5lib::Writer::new();
-    writer.file_identifier = src.file_identifier().to_string();
     for read in src.reads_iter().take(n) {
         let signal = read.signal().expect("decompress");
         writer.add_read(read.clone(), signal);
@@ -242,7 +241,6 @@ fn writer_round_trip_signal() {
     let n = 3.min(src.len());
 
     let mut writer = pod5lib::Writer::new();
-    writer.file_identifier = src.file_identifier().to_string();
     let orig_signals: Vec<Vec<i16>> = src
         .reads_iter()
         .take(n)
@@ -287,6 +285,17 @@ fn writer_empty_file() {
 }
 
 #[test]
+fn writer_rejects_invalid_file_identifier() {
+    let mut writer = pod5lib::Writer::new();
+    writer.file_identifier = "not-a-uuid".to_string();
+    let err = writer.write_to(&mut Vec::new()).unwrap_err();
+    assert!(
+        matches!(err, pod5lib::Error::InvalidFileIdentifier(_)),
+        "{err}"
+    );
+}
+
+#[test]
 fn writer_rejects_invalid_pod5_version() {
     let mut writer = pod5lib::Writer::new();
     writer.pod5_version = "0.1".to_string();
@@ -314,7 +323,6 @@ fn writer_round_trip_v7_fields() {
     read.selected_read_level = 85.25;
 
     let mut writer = pod5lib::Writer::new();
-    writer.file_identifier = src.file_identifier().to_string();
     writer.add_read(read, orig.signal().expect("decompress"));
     let mut buf = Vec::new();
     writer.write_to(&mut buf).expect("write_to failed");
