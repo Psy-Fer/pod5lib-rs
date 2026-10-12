@@ -59,6 +59,13 @@ pub enum Error {
     #[error("run_info column references unknown acquisition_id: '{0}'")]
     MissingRunInfo(String),
 
+    /// The file was written by `pod5` older than 0.0.38 (Reads table V0–V2), whose
+    /// layout this crate does not read. Convert it with upstream `pod5 update`.
+    #[error(
+        "unsupported legacy POD5 file (pod5_version {0}, older than 0.0.38); convert it with `pod5 update`"
+    )]
+    LegacyPod5Version(String),
+
     /// The writer's `pod5_version` is not a version upstream `pod5` accepts: it must be
     /// `X.Y.Z` with each part ≤ 65535, and at least `0.0.38` (older values trigger an
     /// on-open migration of legacy formats).

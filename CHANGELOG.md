@@ -13,6 +13,9 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Added
 
+- `Error::LegacyPod5Version`: files from `pod5` older than 0.0.38 (Reads table V0–V2) now fail with a clear error suggesting `pod5 update`, instead of a misleading "RunInfoTable missing".
+- Test fixtures from ONT's pod5 repository (`tests/fixtures/`, Reads table V2–V7, MPL-2.0) with per-version tests; file-backed integration tests now run in CI instead of being skipped.
+- CI job checking interop with Python `pod5` 0.3.49 and 0.3.39 (read parity and write parity on every fixture).
 - `POD5_COMPAT_VERSION` (`"0.3.49"`): the upstream `pod5` version this crate is validated against.
 - `Error::InvalidFileIdentifier`: writers reject a `file_identifier` that is not a UUID (upstream refuses to open such files). Any UUID form is accepted and written in canonical hyphenated form.
 - `Error::InvalidPod5Version`: writers now reject a `pod5_version` that upstream would refuse to open (not `X.Y.Z`) or would wrongly migrate (below `0.0.38`).

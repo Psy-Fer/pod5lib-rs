@@ -32,6 +32,7 @@ def find_test_file() -> pathlib.Path | None:
     for candidate in [
         ROOT / "tests/data/sample.pod5",
         ROOT / "examples/small.pod5",
+        ROOT / "tests/fixtures/multi_fast5_zip_v7.pod5",
     ]:
         if candidate.exists():
             return candidate

@@ -33,6 +33,7 @@ def find_test_file() -> pathlib.Path | None:
     for candidate in [
         ROOT / "tests/data/sample.pod5",
         ROOT / "examples/small.pod5",
+        ROOT / "tests/fixtures/multi_fast5_zip_v7.pod5",
     ]:
         if candidate.exists():
             return candidate
@@ -76,6 +77,7 @@ def run_parity(src: pathlib.Path) -> None:
 
     print(f"\nSource:   {src}  ({n} reads)")
     print("Building Rust writer (first run may take ~30 s)…")
+    OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     run_rust_writer(src, OUT_FILE, n)
     print(f"Output:   {OUT_FILE}")
 

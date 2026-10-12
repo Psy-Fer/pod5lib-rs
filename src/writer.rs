@@ -21,7 +21,9 @@ use rayon::prelude::*;
 
 use crate::error::Error;
 use crate::footer;
-use crate::format::{FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8};
+use crate::format::{
+    FOOTER_MAGIC, MIN_POD5_VERSION, SECTION_MARKER_LEN, SIGNATURE, align8, parse_pod5_version,
+};
 use crate::signal::compress_vbz;
 use crate::types::{ReadRecord, RunInfo};
 use crate::{POD5_COMPAT_VERSION, Result};
@@ -606,16 +608,8 @@ fn canonical_file_identifier(id: &str) -> Result<String> {
 /// Reject `pod5_version` values that upstream `pod5` would refuse to open
 /// (not `X.Y.Z` of u16 parts) or would wrongly migrate (below 0.0.38).
 fn validate_pod5_version(v: &str) -> Result<()> {
-    let parts: Vec<Option<u16>> = v
-        .split('.')
-        .map(|p| {
-            (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-                .then(|| p.parse().ok())
-                .flatten()
-        })
-        .collect();
-    match parts[..] {
-        [Some(a), Some(b), Some(c)] if (a, b, c) >= (0, 0, 38) => Ok(()),
+    match parse_pod5_version(v) {
+        Some(ver) if ver >= MIN_POD5_VERSION => Ok(()),
         _ => Err(Error::InvalidPod5Version(v.to_string())),
     }
 }

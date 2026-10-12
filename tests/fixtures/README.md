@@ -1,0 +1,25 @@
+# Test fixtures
+
+`multi_fast5_zip_v{2..6}.pod5` come from the `test_data/` directory of Oxford Nanopore
+Technologies' [pod5-file-format](https://github.com/nanoporetech/pod5-file-format)
+repository. They are © Oxford Nanopore Technologies PLC and licensed under the
+[Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/), the same licence as this crate.
+
+`multi_fast5_zip_v7.pod5` was produced from the v6 file with upstream pod5 0.3.49:
+
+```bash
+pod5 merge multi_fast5_zip_v6.pod5 -o multi_fast5_zip_v7.pod5
+```
+
+Every file holds the same 10 reads; the number is the Reads-table schema version.
+
+| File | Reads table | Footer `pod5_version` | Used for |
+|---|---|---|---|
+| `multi_fast5_zip_v2.pod5` | V2 | 0.0.32 | Legacy-file rejection |
+| `multi_fast5_zip_v3.pod5` | V3 | 0.0.40 | Reading |
+| `multi_fast5_zip_v4.pod5` | V4 | 0.3.30 | Reading |
+| `multi_fast5_zip_v5.pod5` | V5 | 0.3.45 | Reading |
+| `multi_fast5_zip_v6.pod5` | V6 (`channel` as `UInt32`) | 0.3.46 | Reading |
+| `multi_fast5_zip_v7.pod5` | V7 (`channel_32bit`) | 0.3.49 | Reading; default input for parity scripts |
+
+These files and `tests/fixtures.rs` are excluded from the published crate (see `exclude` in `Cargo.toml`).

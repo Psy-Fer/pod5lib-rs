@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::footer::{self, ContentType, Footer};
 use crate::format::{
-    FOOTER_LEN_FIELD_FROM_END, FOOTER_MAGIC, SECTION_MARKER_LEN, SIGNATURE, align8,
+    FOOTER_LEN_FIELD_FROM_END, FOOTER_MAGIC, MIN_POD5_VERSION, SECTION_MARKER_LEN, SIGNATURE,
+    align8, parse_pod5_version,
 };
 use crate::tables;
 use crate::types::{ReadRecord, RunInfo};
@@ -121,6 +122,12 @@ impl Reader {
 
         // ── 4. Parse FlatBuffers footer ───────────────────────────────────
         let footer = footer::parse(&footer_bytes)?;
+
+        // Pre-0.0.38 files use a legacy layout that upstream migrates on open.
+        // Unparseable versions are let through; the table parsers decide.
+        if parse_pod5_version(&footer.pod5_version).is_some_and(|v| v < MIN_POD5_VERSION) {
+            return Err(Error::LegacyPod5Version(footer.pod5_version));
+        }
 
         // ── 5. Locate required tables ─────────────────────────────────────
         let find = |ct: ContentType| -> Option<(u64, u64)> {

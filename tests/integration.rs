@@ -3,8 +3,7 @@
 /// File-backed tests look for a POD5 file in this order:
 ///   1. tests/data/sample.pod5
 ///   2. examples/small.pod5
-///
-/// If neither exists the tests are silently skipped.
+///   3. tests/fixtures/multi_fast5_zip_v7.pod5 (committed, so these always run in CI)
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -13,6 +12,7 @@ fn sample_pod5() -> Option<PathBuf> {
     let candidates = [
         root.join("tests/data/sample.pod5"),
         root.join("examples/small.pod5"),
+        root.join("tests/fixtures/multi_fast5_zip_v7.pod5"),
     ];
     candidates.into_iter().find(|p| p.exists())
 }

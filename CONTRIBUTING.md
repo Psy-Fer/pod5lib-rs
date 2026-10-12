@@ -15,11 +15,20 @@ cargo ci-fmt
 cargo ci-clippy
 cargo ci-test
 
-# Integration tests against a real file
+# Integration tests also run against your own file if present
+# (otherwise they use the committed tests/fixtures/multi_fast5_zip_v7.pod5)
 mkdir -p tests/data
 cp your_file.pod5 tests/data/sample.pod5
 cargo ci-test
+
+# Python interop (also run in CI against pod5 0.3.49 and 0.3.39)
+pip install pod5==0.3.49
+python tests/test_parity.py tests/fixtures/multi_fast5_zip_v7.pod5        # Rust vs Python reader
+python tests/test_write_parity.py tests/fixtures/multi_fast5_zip_v7.pod5  # Rust writer -> Python reader
 ```
+
+`tests/fixtures/` holds ONT's upstream test files, one per Reads-table version (V2–V7);
+see its README for provenance.
 
 ## What to work on
 
@@ -35,7 +44,7 @@ The reference for correctness is the Python `pod5` library. Before submitting a 
 2. Verify files written by pod5lib-rs are readable by Python `pod5`
 3. Note the Python `pod5` version you tested against in the PR description
 
-The currently validated versions are **0.3.39** and **0.3.49**. If you test against a newer version and it still works, update `CHANGELOG.md` and the compatibility note in `README.md`.
+The currently validated versions are **0.3.39** and **0.3.49**; the `python-interop` CI job checks both. When validating a new release, update `POD5_COMPAT_VERSION` in `src/lib.rs` and the CI matrix. If you test against a newer version and it still works, update `CHANGELOG.md` and the compatibility note in `README.md`.
 
 ## Reporting bugs
 

@@ -14,6 +14,23 @@ pub(crate) const FOOTER_MAGIC: [u8; 8] = [b'F', b'O', b'O', b'T', b'E', b'R', 0x
 ///   closing_sig(8) + final_section_marker(16) + footer_len_field(8) = 32
 pub(crate) const FOOTER_LEN_FIELD_FROM_END: u64 = 32;
 
+/// Oldest `pod5_version` with the current container layout (Reads table V3).
+/// Upstream `pod5` physically migrates older files on open; we reject them.
+pub(crate) const MIN_POD5_VERSION: (u16, u16, u16) = (0, 0, 38);
+
+/// Parse a `pod5_version` string the way upstream does: exactly `X.Y.Z`, each a u16.
+pub(crate) fn parse_pod5_version(v: &str) -> Option<(u16, u16, u16)> {
+    let mut parts = v.split('.').map(|p| {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u16>().ok())
+            .flatten()
+    });
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Some(a)), Some(Some(b)), Some(Some(c)), None) => Some((a, b, c)),
+        _ => None,
+    }
+}
+
 /// Align `n` up to the next multiple of 8.
 #[inline]
 pub(crate) fn align8(n: u64) -> u64 {
@@ -22,7 +39,25 @@ pub(crate) fn align8(n: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::align8;
+    use super::{align8, parse_pod5_version};
+
+    #[test]
+    fn parse_pod5_versions() {
+        assert_eq!(parse_pod5_version("0.3.49"), Some((0, 3, 49)));
+        assert_eq!(parse_pod5_version("65535.0.0"), Some((65535, 0, 0)));
+        for bad in [
+            "",
+            "0.1",
+            "1.0.0.0",
+            "0.2.0-rc1",
+            "65536.0.0",
+            "1..0",
+            "+1.0.0",
+            " 1.0.0",
+        ] {
+            assert_eq!(parse_pod5_version(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn align8_already_aligned() {

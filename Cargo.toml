@@ -12,6 +12,8 @@ keywords = ["nanopore", "pod5", "bioinformatics", "genomics", "sequencing"]
 categories = ["science", "parser-implementations", "filesystem"]
 authors = ["Psy-Fer"]
 rust-version = "1.87"
+# Keep test POD5 files out of the published crate.
+exclude = ["tests/fixtures/", "tests/fixtures.rs", "tests/data/", "examples/*.pod5"]
 
 [lib]
 name = "pod5lib"
