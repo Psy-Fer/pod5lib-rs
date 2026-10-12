@@ -6,8 +6,10 @@
 /// Default: out = tests/data/rust_scratch.pod5
 ///
 /// Read i (0-based) gets channel 100 + i (read 3 uses 70000, which only fits in
-/// `channel_32bit`), read_number 1000 + i, and signal `(j * 7 + i) % 1024 - 512`
-/// for j in 0..(1000 * (i + 1)).
+/// `channel_32bit`), read_number 1000 + i, end reason END_REASONS[i] with its
+/// default `forced` flag, and signal `(j * 7 + i) % 1024 - 512` for j in
+/// 0..SIGNAL_LENS[i]. Read 4 spans three 102,400-sample signal rows; read 5 has
+/// an empty signal.
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,11 +18,22 @@ use pod5lib::{
     uuid_from_str,
 };
 
-const READ_IDS: [&str; 4] = [
+const READ_IDS: [&str; 6] = [
     "11111111-2222-4333-8444-555555555555",
     "21111111-2222-4333-8444-555555555555",
     "31111111-2222-4333-8444-555555555555",
     "41111111-2222-4333-8444-555555555555",
+    "51111111-2222-4333-8444-555555555555",
+    "61111111-2222-4333-8444-555555555555",
+];
+const SIGNAL_LENS: [usize; 6] = [1000, 2000, 3000, 4000, 250_000, 0];
+const END_REASONS: [&str; 6] = [
+    "signal_positive",
+    "mux_change",
+    "signal_negative",
+    "unblock_mux_change",
+    "paused",
+    "api_request",
 ];
 
 fn main() {
@@ -63,10 +76,9 @@ fn main() {
             1000 + i as u32,
             (i as u64) * 100_000,
             200.0 + i as f32,
-            EndReason {
-                reason: EndReasonKind::SignalPositive,
-                forced: false,
-            },
+            EndReason::from_reason_with_default_forced(EndReasonKind::from_reason_str(
+                END_REASONS[i],
+            )),
             Arc::clone(&run_info),
         );
         read.tracked_scaling = ShiftScalePair {
@@ -75,7 +87,7 @@ fn main() {
         };
         read.expected_open_pore_level = 230.0;
 
-        let n = 1000 * (i + 1);
+        let n = SIGNAL_LENS[i];
         let signal: Vec<i16> = (0..n).map(|j| ((j * 7 + i) % 1024) as i16 - 512).collect();
         writer.add_read(read, signal);
     }

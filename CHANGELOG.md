@@ -8,6 +8,12 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Fixed
 
+- **`end_reason` dictionary order:** writers now emit all ten known reasons in `pod5.EndReasonEnum` order, as upstream does, so each read's dictionary key equals its enum value. Before, the dictionary was built in first-seen order, so anything using the raw key (such as Python `ReadRecord.end_reason_index`) got the wrong reason.
+- `StreamingWriter::finish()` reported `WriterThreadDied` instead of the actual error (such as a full disk) when the writer thread failed.
+- Writers did not flush explicitly, so an error writing the end of the file could be lost.
+- `Writer::write_file` emptied an existing output file before validating the writer's settings.
+- Signals longer than 4,294,967,295 samples were silently truncated; more than 32,768 distinct pore types or run infos produced a corrupt dictionary (now `Error::TooManyDictionaryValues`).
+- `signal_batch_size = 0` panicked; it is now treated as 1.
 - The crate did not build on its stated minimum Rust version (1.87): it used `let` chains, stable only from 1.88. CI now builds and tests on 1.87.
 - Writers now take `num_samples` from the signal they are given rather than from the record, so the Reads and Signal tables cannot disagree.
 - **Files written by pod5lib could not be opened by Python `pod5` ≥ 0.3.47** ("Invalid footer found in file"). The FlatBuffers footer is now padded to a multiple of 8 bytes and its `int64` fields are 8-byte aligned, matching upstream's builder.
@@ -15,6 +21,9 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Added
 
+- `EndReason::from_reason_with_default_forced` and `EndReasonKind::default_forced`, matching Python `pod5`.
+- `Error::TooManyDictionaryValues`.
+- `StreamingWriter` implements `Debug`.
 - `ReadRecord::new`: build reads from scratch (e.g. when converting from FAST5/BLOW5) with the same required fields as Python `pod5.Read`; other fields take Python's defaults. See `examples/write_from_scratch.rs`.
 - `uuid_from_str`: parse a read ID string into the 16 bytes stored in POD5 (inverse of `uuid_to_str`).
 - `RunInfo` implements `Default`, for struct update syntax.
@@ -29,6 +38,14 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 
 ### Changed
 
+- **Breaking:** `Error` and `EndReasonKind` are `#[non_exhaustive]`; `match` on them needs a wildcard arm. Future variants will not be breaking changes.
+- **Breaking:** `Error::Arrow` holds the arrow error type-erased (available through `std::error::Error::source`), so `arrow` is no longer part of the public API and can be upgraded in a patch release.
+- **Breaking:** `EndReasonKind::Other` now holds the unrecognised reason string (was an always-zero `u8`), and writers write it back unchanged (was `"other"`, which Python `pod5` cannot parse). Reading an unrecognised reason prints a one-time warning per string asking for it to be reported. `EndReasonKind` is no longer `Copy`, and `as_str` borrows from it.
+- **Breaking:** a `StreamingWriter` dropped without `finish()` now abandons the file without a footer, so it cannot be opened. Before, the background thread completed it as a valid file that silently lacked the last buffered reads.
+- Signal is written in rows of up to 102,400 samples, as upstream does (was one row per read). Reads of any length can be written, and Python's per-row APIs (`signal_rows`, `signal_for_chunk`) match upstream-written files.
+- Both writers share one implementation. `Writer` compresses `signal_batch_size` reads at a time rather than holding every compressed read in memory; in a 4,282-read benchmark, `StreamingWriter` peak memory dropped from 322 MB to 145 MB with no change in speed.
+- `ShiftScalePair` equality follows Python: two all-NaN pairs (such as `UNAVAILABLE`) are equal.
+- The section marker between tables is a random UUID per file, as upstream writes (was all zeros).
 - Writer defaults: `file_identifier` is now a fresh random (v4) UUID, as upstream generates for every new file (was empty, which produced files upstream could not open). New dependency: `uuid`.
 - Writer defaults: `pod5_version` is now `POD5_COMPAT_VERSION` (was the crate version), and `software` is `"pod5lib-rs <version> (pod5 <compat version>)"` (was `"pod5lib <version>"`).
 - **Breaking:** `Pore::channel` is now `u32`. It is read from `channel_32bit` when present, so channels above 65535 are preserved.

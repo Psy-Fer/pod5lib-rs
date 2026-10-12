@@ -14,7 +14,10 @@ ROOT = pathlib.Path(__file__).parent.parent
 OUT_FILE = ROOT / "tests/data/rust_scratch.pod5"
 
 # Must match examples/write_from_scratch.rs
-READ_IDS = [f"{d}1111111-2222-4333-8444-555555555555" for d in "1234"]
+READ_IDS = [f"{d}1111111-2222-4333-8444-555555555555" for d in "123456"]
+SIGNAL_LENS = [1000, 2000, 3000, 4000, 250_000, 0]
+END_REASONS = ["signal_positive", "mux_change", "signal_negative", "unblock_mux_change", "paused", "api_request"]
+CHUNK = 102_400  # upstream's default max_signal_chunk_size
 
 
 def main() -> None:
@@ -47,14 +50,19 @@ def main() -> None:
             r = reads.get(rid)
             if r is None:
                 continue
-            n = 1000 * (i + 1)
+            n = SIGNAL_LENS[i]
             want_signal = (np.arange(n) * 7 + i) % 1024 - 512
             want_channel = 100 + i if i != 3 else (70000 if knows_channel_32bit else 0)
             check(f"{rid[:8]} channel", r.pore.channel, want_channel)
             check(f"{rid[:8]} read_number", r.read_number, 1000 + i)
             check(f"{rid[:8]} start_sample", r.start_sample, i * 100_000)
             check(f"{rid[:8]} median_before", r.median_before, 200.0 + i)
-            check(f"{rid[:8]} end_reason", r.end_reason.reason.name.lower(), "signal_positive")
+            reason = pod5.EndReasonEnum[END_REASONS[i].upper()]
+            check(f"{rid[:8]} end_reason", r.end_reason.reason, reason)
+            check(f"{rid[:8]} end_reason_forced", r.end_reason.forced, pod5.EndReason.from_reason_with_default_forced(reason).forced)
+            # The dictionary index must equal the enum value, as in upstream files.
+            check(f"{rid[:8]} end_reason_index", r.end_reason_index, reason.value)
+            check(f"{rid[:8]} signal rows", len(r.signal_rows), -(-n // CHUNK))
             check(f"{rid[:8]} num_samples", r.num_samples, n)
             check(f"{rid[:8]} signal", r.signal.tolist(), want_signal.tolist())
             check(f"{rid[:8]} tracked_scaling", (r.tracked_scaling.shift, r.tracked_scaling.scale), (1.5, 2.5))

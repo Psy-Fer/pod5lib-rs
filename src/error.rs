@@ -1,5 +1,9 @@
 /// All errors that can be produced by this library.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added without a breaking release,
+/// so `match` on it needs a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Underlying I/O error (file open, read, seek).
     #[error("I/O error: {0}")]
@@ -22,8 +26,12 @@ pub enum Error {
     FlatBuffers(String),
 
     /// An Arrow IPC operation failed (schema mismatch, truncated batch, etc.).
+    ///
+    /// The underlying `arrow` error is available through
+    /// [`std::error::Error::source`]; its type is not part of this crate's API, so
+    /// `arrow` can be upgraded without a breaking release.
     #[error("Arrow error: {0}")]
-    Arrow(#[from] arrow::error::ArrowError),
+    Arrow(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// A required Arrow IPC section (Reads, Signal, or RunInfo) was absent from the footer.
     #[error("required table missing from footer: {0}")]
@@ -76,7 +84,21 @@ pub enum Error {
     #[error("invalid file_identifier '{0}': expected a UUID")]
     InvalidFileIdentifier(String),
 
+    /// A dictionary column (`pore_type`, `end_reason` or `run_info`) would need more
+    /// than 32,768 distinct values, the limit of its `Int16` keys.
+    #[error("too many distinct values for dictionary column '{0}' (limit 32768)")]
+    TooManyDictionaryValues(&'static str),
+
     /// The background writer thread exited before the file was complete.
     #[error("writer thread exited unexpectedly")]
     WriterThreadDied,
+}
+
+// Not public API: lets `?` convert arrow errors inside the crate. The variant holds
+// the error type-erased so that upgrading `arrow` is not a breaking change.
+#[doc(hidden)]
+impl From<arrow::error::ArrowError> for Error {
+    fn from(e: arrow::error::ArrowError) -> Self {
+        Error::Arrow(Box::new(e))
+    }
 }

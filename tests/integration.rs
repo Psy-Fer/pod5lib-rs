@@ -521,3 +521,140 @@ fn uuid_from_str_round_trip() {
     );
     assert_eq!(pod5lib::uuid_from_str("not-a-uuid"), None);
 }
+
+// ── Writer behaviour ──────────────────────────────────────────────────────────
+
+fn scratch_read(id: &str, signal_len: usize) -> (pod5lib::ReadRecord, Vec<i16>) {
+    let (mut r, _) = scratch_reads().remove(0);
+    r.read_id = pod5lib::uuid_from_str(id).unwrap();
+    let signal = (0..signal_len).map(|i| (i % 4000) as i16 - 2000).collect();
+    (r, signal)
+}
+
+#[test]
+fn writer_long_and_empty_signals_round_trip() {
+    // 250_000 samples spans three 102_400-sample signal rows; the empty read has none.
+    let reads = [
+        scratch_read("11111111-0000-4000-8000-000000000001", 250_000),
+        scratch_read("11111111-0000-4000-8000-000000000002", 0),
+        scratch_read("11111111-0000-4000-8000-000000000003", 102_400),
+    ];
+    for streaming in [false, true] {
+        let dst = if streaming {
+            let path =
+                std::env::temp_dir().join(format!("pod5lib-chunks-{}.pod5", std::process::id()));
+            let mut w = pod5lib::StreamingWriter::create(&path).unwrap();
+            w.signal_batch_size = 2;
+            for (r, s) in &reads {
+                w.write_read(r, s).unwrap();
+            }
+            w.finish().unwrap();
+            let dst = pod5lib::Reader::from_reader(&mut std::fs::File::open(&path).unwrap());
+            let _ = std::fs::remove_file(&path);
+            dst.unwrap()
+        } else {
+            let mut w = pod5lib::Writer::new();
+            w.signal_batch_size = 2;
+            for (r, s) in &reads {
+                w.add_read(r.clone(), s.clone());
+            }
+            let mut buf = Vec::new();
+            w.write_to(&mut buf).unwrap();
+            pod5lib::Reader::from_reader(&mut Cursor::new(buf)).unwrap()
+        };
+        for (r, s) in &reads {
+            let got = dst.get_read_by_id(&r.read_id_str()).unwrap();
+            assert_eq!(got.num_samples, s.len() as u64, "streaming={streaming}");
+            assert_eq!(&got.signal().unwrap(), s, "streaming={streaming}");
+        }
+    }
+}
+
+#[test]
+fn writer_keeps_unrecognised_end_reason() {
+    let (mut r, s) = scratch_read("11111111-0000-4000-8000-000000000004", 10);
+    r.end_reason.reason = pod5lib::EndReasonKind::from_reason_str("some_future_reason");
+    let mut w = pod5lib::Writer::new();
+    w.add_read(r, s);
+    let mut buf = Vec::new();
+    w.write_to(&mut buf).unwrap();
+    let dst = pod5lib::Reader::from_reader(&mut Cursor::new(buf)).unwrap();
+    assert_eq!(
+        dst.reads()[0].end_reason.reason,
+        pod5lib::EndReasonKind::Other("some_future_reason".into())
+    );
+}
+
+#[test]
+fn streaming_writer_dropped_without_finish_leaves_invalid_file() {
+    let path = std::env::temp_dir().join(format!("pod5lib-drop-{}.pod5", std::process::id()));
+    {
+        let mut w = pod5lib::StreamingWriter::create(&path).unwrap();
+        w.signal_batch_size = 1; // start the writer thread on the first read
+        for (r, s) in scratch_reads() {
+            w.write_read(&r, &s).unwrap();
+        }
+        // dropped here without finish()
+    }
+    assert!(
+        pod5lib::Reader::open(&path).is_err(),
+        "abandoned file must not open"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn streaming_writer_reports_io_error() {
+    // /dev/full fails every write with ENOSPC; the real error must surface, not
+    // WriterThreadDied. (It may arrive wrapped by arrow, which did the write.)
+    let mut w = pod5lib::StreamingWriter::create("/dev/full").unwrap();
+    w.signal_batch_size = 1;
+    let mut result = Ok(());
+    for (r, s) in scratch_reads() {
+        result = result.and_then(|_| w.write_read(&r, &s));
+    }
+    let err = result.and_then(|_| w.finish()).unwrap_err();
+    assert!(err.to_string().contains("os error 28"), "{err}");
+}
+
+#[test]
+fn write_file_validates_before_truncating() {
+    let path = std::env::temp_dir().join(format!("pod5lib-keep-{}.pod5", std::process::id()));
+    std::fs::write(&path, b"existing contents").unwrap();
+    let mut w = pod5lib::Writer::new();
+    w.pod5_version = "bad".into();
+    assert!(w.write_file(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"existing contents");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn writer_signal_batch_size_zero_is_treated_as_one() {
+    let mut w = pod5lib::Writer::new();
+    w.signal_batch_size = 0;
+    for (r, s) in scratch_reads() {
+        w.add_read(r, s);
+    }
+    let mut buf = Vec::new();
+    w.write_to(&mut buf).unwrap();
+    check_scratch_reads(&pod5lib::Reader::from_reader(&mut Cursor::new(buf)).unwrap());
+}
+
+#[test]
+fn writer_rejects_too_many_pore_types() {
+    let (template, _) = scratch_reads().remove(0);
+    let mut w = pod5lib::Writer::new();
+    // Int16 keys allow 32_768 distinct values (0..=32_767); one more must fail.
+    for i in 0..=32_768u32 {
+        let mut r = template.clone();
+        r.read_id[..4].copy_from_slice(&i.to_be_bytes());
+        r.pore.pore_type = format!("pore_{i}");
+        w.add_read(r, Vec::new());
+    }
+    let err = w.write_to(&mut Vec::new()).unwrap_err();
+    assert!(
+        matches!(err, pod5lib::Error::TooManyDictionaryValues("pore_type")),
+        "{err}"
+    );
+}

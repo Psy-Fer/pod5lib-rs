@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::Result;
 use crate::signal::SignalTable;
@@ -91,8 +91,12 @@ impl Calibration {
 
 // ── EndReason ─────────────────────────────────────────────────────────────────
 
-/// Why a read was terminated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a read was terminated. Values match Python `pod5.EndReasonEnum`.
+///
+/// Marked `#[non_exhaustive]`: MinKNOW may add reasons, and new variants will be
+/// added here without a breaking release.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EndReasonKind {
     /// Reason not known or not recorded.
     Unknown,
@@ -114,12 +118,31 @@ pub enum EndReasonKind {
     AnalysisConfigChange,
     /// Sequencing was paused.
     Paused,
-    /// Unrecognised end-reason string; the raw discriminant is preserved.
-    Other(u8),
+    /// An end-reason string this crate does not recognise, kept verbatim so it is
+    /// written back unchanged. Reading one prints a one-time warning per string.
+    Other(String),
 }
+
+/// Every known end reason, in `pod5.EndReasonEnum` order: index `i` has enum value `i`.
+/// Writers emit this as the `end_reason` dictionary, as upstream does.
+pub(crate) const KNOWN_END_REASONS: [&str; 10] = [
+    "unknown",
+    "mux_change",
+    "unblock_mux_change",
+    "data_service_unblock_mux_change",
+    "signal_positive",
+    "signal_negative",
+    "api_request",
+    "device_data_error",
+    "analysis_config_change",
+    "paused",
+];
 
 impl EndReasonKind {
     /// Parse the lowercase snake_case reason string stored in the POD5 dictionary column.
+    ///
+    /// Unrecognised strings become [`Self::Other`], and a warning asking for a bug
+    /// report is printed to stderr once per distinct string.
     pub fn from_reason_str(s: &str) -> Self {
         match s {
             "unknown" => Self::Unknown,
@@ -132,12 +155,15 @@ impl EndReasonKind {
             "device_data_error" => Self::DeviceDataError,
             "analysis_config_change" => Self::AnalysisConfigChange,
             "paused" => Self::Paused,
-            _ => Self::Other(0),
+            _ => {
+                warn_unrecognised_end_reason(s);
+                Self::Other(s.to_owned())
+            }
         }
     }
 
-    /// Return the canonical snake_case string representation.
-    pub fn as_str(&self) -> &'static str {
+    /// Return the snake_case string stored in POD5 files.
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Unknown => "unknown",
             Self::MuxChange => "mux_change",
@@ -149,8 +175,36 @@ impl EndReasonKind {
             Self::DeviceDataError => "device_data_error",
             Self::AnalysisConfigChange => "analysis_config_change",
             Self::Paused => "paused",
-            Self::Other(_) => "other",
+            Self::Other(s) => s,
         }
+    }
+
+    /// Default `forced` flag for this reason, as Python
+    /// `EndReason.from_reason_with_default_forced` uses: `true` for reasons that
+    /// MinKNOW triggers (mux changes, API requests, errors, config changes, pauses),
+    /// `false` for `Unknown`, the signal-threshold reasons and unrecognised reasons.
+    pub fn default_forced(&self) -> bool {
+        !matches!(
+            self,
+            Self::Unknown | Self::SignalPositive | Self::SignalNegative | Self::Other(_)
+        )
+    }
+}
+
+/// Print a warning the first time each unrecognised end-reason string is seen.
+fn warn_unrecognised_end_reason(s: &str) {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if seen.insert(s.to_owned()) {
+        eprintln!(
+            "pod5lib warning: unrecognised end_reason {s:?}, kept as EndReasonKind::Other. \
+             It may come from a newer MinKNOW or pod5 release. Please report it at \
+             https://github.com/Psy-Fer/pod5lib-rs/issues so it can be added \
+             (known reasons: https://github.com/nanoporetech/pod5-file-format/blob/master/python/pod5/src/pod5/pod5_types.py)."
+        );
     }
 }
 
@@ -163,10 +217,23 @@ pub struct EndReason {
     pub forced: bool,
 }
 
+impl EndReason {
+    /// End reason with the conventional `forced` flag for `reason`
+    /// (see [`EndReasonKind::default_forced`]), like Python
+    /// `pod5.EndReason.from_reason_with_default_forced`.
+    pub fn from_reason_with_default_forced(reason: EndReasonKind) -> Self {
+        let forced = reason.default_forced();
+        Self { reason, forced }
+    }
+}
+
 // ── ScaleShift ────────────────────────────────────────────────────────────────
 
 /// Optional (shift, scale) pair; `f32::NAN` when unavailable.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Equality follows Python `pod5.ShiftScalePair`: two pairs whose components are all
+/// NaN are equal (so `UNAVAILABLE == UNAVAILABLE`); otherwise components compare as floats.
+#[derive(Debug, Clone, Copy)]
 pub struct ShiftScalePair {
     /// Shift component; `f32::NAN` if this pair was not recorded.
     pub shift: f32,
@@ -184,6 +251,15 @@ impl ShiftScalePair {
     /// Returns `true` if both components are finite (i.e. the pair was recorded).
     pub fn is_available(&self) -> bool {
         self.shift.is_finite() && self.scale.is_finite()
+    }
+}
+
+impl PartialEq for ShiftScalePair {
+    fn eq(&self, other: &Self) -> bool {
+        let all_nan = [self.shift, self.scale, other.shift, other.scale]
+            .iter()
+            .all(|x| x.is_nan());
+        all_nan || (self.shift == other.shift && self.scale == other.scale)
     }
 }
 
@@ -452,8 +528,48 @@ mod tests {
     #[test]
     fn end_reason_unknown_variant() {
         let k = EndReasonKind::from_reason_str("something_new");
-        assert!(matches!(k, EndReasonKind::Other(_)));
-        assert_eq!(k.as_str(), "other");
+        assert_eq!(k, EndReasonKind::Other("something_new".into()));
+        assert_eq!(k.as_str(), "something_new");
+        assert!(!k.default_forced());
+    }
+
+    #[test]
+    fn known_end_reasons_match_enum_order() {
+        for (i, s) in KNOWN_END_REASONS.iter().enumerate() {
+            let k = EndReasonKind::from_reason_str(s);
+            assert!(!matches!(k, EndReasonKind::Other(_)), "{s}");
+            assert_eq!(k.as_str(), *s);
+            // Python pod5.EndReasonEnum: index == value; forced defaults from
+            // _END_REASON_FORCED_DEFAULTS.
+            let forced = !matches!(i, 0 | 4 | 5);
+            assert_eq!(k.default_forced(), forced, "{s}");
+        }
+        let er = EndReason::from_reason_with_default_forced(EndReasonKind::MuxChange);
+        assert!(er.forced);
+    }
+
+    #[test]
+    fn shift_scale_pair_eq_matches_python() {
+        let nan = ShiftScalePair::UNAVAILABLE;
+        assert_eq!(nan, ShiftScalePair::UNAVAILABLE);
+        let a = ShiftScalePair {
+            shift: 1.0,
+            scale: 2.0,
+        };
+        assert_eq!(
+            a,
+            ShiftScalePair {
+                shift: 1.0,
+                scale: 2.0
+            }
+        );
+        assert_ne!(a, nan);
+        // Partially NaN pairs are never equal, as in Python.
+        let half = ShiftScalePair {
+            shift: f32::NAN,
+            scale: 2.0,
+        };
+        assert_ne!(half, half);
     }
 
     #[test]
