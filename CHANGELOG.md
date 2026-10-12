@@ -36,6 +36,8 @@ Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7).
 - `Error::LegacyPod5Version`: files from `pod5` older than 0.0.38 (Reads table V0–V2) now fail with a clear error suggesting `pod5 update`, instead of a misleading "RunInfoTable missing".
 - Test fixtures from ONT's pod5 repository (`tests/fixtures/`, Reads table V2–V7, MPL-2.0) with per-version tests; file-backed integration tests now run in CI instead of being skipped.
 - CI job checking interop with Python `pod5` 0.3.49 and 0.3.39 (read parity and write parity on every fixture).
+- `tests/fixtures/all_fields_v7.pod5`, written by upstream pod5 0.3.49 with a distinct real value in every field (channels 65535–70000, V5 levels, scaling pairs, mux fields, two run infos), plus the script that generates it. Before, every fixture had NaN optional fields and channels below 65536, so those comparisons only checked NaN against NaN. Rust tests check its values through both readers and a round trip through both writers; the CI interop job compares it field by field with Python.
+- The write parity script now compares every read field and the full run info (46 fields, was 13).
 - `POD5_COMPAT_VERSION` (`"0.3.49"`): the upstream `pod5` version this crate is validated against.
 - `Error::InvalidFileIdentifier`: writers reject a `file_identifier` that is not a UUID (upstream refuses to open such files). Any UUID form is accepted and written in canonical hyphenated form.
 - `Error::InvalidPod5Version`: writers now reject a `pod5_version` that upstream would refuse to open (not `X.Y.Z`) or would wrongly migrate (below `0.0.38`).

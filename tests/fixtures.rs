@@ -121,3 +121,171 @@ fn reads_uncompressed_signal() {
         assert_eq!(par.len(), 3);
     }
 }
+
+#[test]
+fn reads_all_fields_fixture() {
+    // Written by upstream pod5 0.3.49 (tests/fixtures/make_all_fields_fixture.py):
+    // every field has a distinct value; the last read keeps NaN optional floats.
+    use pod5lib::{EndReasonKind, ShiftScalePair};
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all_fields_v7.pod5");
+    let ids = [
+        "00919556-e519-4960-8aa5-c2dfa020980c",
+        "008ed3dc-86c2-452f-b107-6877a473d177",
+        "009dc9bd-c5f4-487b-ba4c-b9ce7e3a711e",
+        "0000173c-bf67-44e7-9a9c-1ad0bc728e74",
+    ];
+    let channels = [1u32, 65535, 65536, 70000];
+    let reasons = [
+        (EndReasonKind::SignalPositive, false),
+        (EndReasonKind::MuxChange, true),
+        (EndReasonKind::DataServiceUnblockMuxChange, true),
+        (EndReasonKind::Paused, false),
+    ];
+    let lazy = Reader::open(&path).expect("open");
+    let eager = Reader::from_reader(&mut std::fs::File::open(&path).unwrap()).unwrap();
+    for reader in [lazy, eager] {
+        assert_eq!(reader.reads_table_version(), 7);
+        assert_eq!(reader.len(), 4);
+        assert_eq!(reader.run_infos().len(), 2);
+        for (i, id) in ids.iter().enumerate() {
+            let r = reader.get_read_by_id(id).expect("read");
+            let f = i as f32;
+            let last = i == 3;
+            let nan_or = |v: f32| if last { f32::NAN } else { v };
+            let same = |a: f32, b: f32| (a.is_nan() && b.is_nan()) || a == b;
+
+            assert_eq!(r.pore.channel, channels[i], "{id}");
+            assert_eq!(r.pore.well, 1 + i as u8);
+            assert_eq!(r.pore.pore_type, format!("pore_type_{}", i % 2));
+            assert_eq!(r.calibration.offset, -240.0 - f);
+            assert!((r.calibration.scale - (0.15 + f / 100.0)).abs() < 1e-6);
+            assert_eq!(r.read_number, 1000 + i as u32);
+            assert_eq!(r.start_sample, 10_000_000 * (i as u64 + 1));
+            assert!(same(r.median_before, nan_or(200.5 + f)), "{id}");
+            assert_eq!(
+                (r.end_reason.reason.clone(), r.end_reason.forced),
+                reasons[i]
+            );
+            assert_eq!(r.num_minknow_events, 100 + i as u64);
+            let pair = |shift, scale| ShiftScalePair {
+                shift: nan_or(shift),
+                scale: nan_or(scale),
+            };
+            assert_eq!(r.tracked_scaling, pair(80.0 + f, 12.5 + f));
+            assert_eq!(r.predicted_scaling, pair(81.0 + f, 13.5 + f));
+            assert_eq!(r.num_reads_since_mux_change, 7 + i as u32);
+            assert_eq!(r.time_since_mux_change, 1.25 + f);
+            assert!(same(r.open_pore_level, nan_or(230.0 + f)), "{id}");
+            assert!(same(r.expected_open_pore_level, nan_or(231.0 + f)), "{id}");
+            assert!(same(r.selected_read_level, nan_or(90.0 + f)), "{id}");
+
+            let ri = &r.run_info;
+            if i % 2 == 0 {
+                assert_eq!(ri.acquisition_id, ACQUISITION_ID);
+                assert_eq!(ri.sample_rate, 4000);
+            } else {
+                assert_eq!(ri.acquisition_id, "all-fields-second-acquisition");
+                assert_eq!(
+                    (ri.adc_min, ri.adc_max, ri.sample_rate),
+                    (-2048, 2047, 5000)
+                );
+                assert_eq!(ri.flow_cell_product_code, "FLO-PRO114M");
+                assert_eq!(ri.sequencer_position_type, "PromethION");
+                assert_eq!(ri.context_tags["experiment_type"], "genomic_dna");
+                assert_eq!(ri.tracking_id["device_type"], "promethion");
+            }
+
+            let e = EXPECTED.iter().find(|e| e.read_id == *id).unwrap();
+            let signal = r.signal().unwrap();
+            assert_eq!(signal.len() as u64, e.num_samples);
+            assert_eq!(signal.iter().map(|&s| s as i64).sum::<i64>(), e.signal_sum);
+        }
+    }
+}
+
+/// Every public field of two reads (and their run infos) is the same.
+fn assert_same_read(a: &pod5lib::ReadRecord, b: &pod5lib::ReadRecord) {
+    let id = a.read_id_str();
+    let same = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x == y;
+    assert_eq!(a.read_id, b.read_id);
+    assert_eq!(a.read_number, b.read_number, "{id}");
+    assert_eq!(a.pore, b.pore, "{id}");
+    assert_eq!(a.calibration, b.calibration, "{id}");
+    assert_eq!(a.end_reason, b.end_reason, "{id}");
+    assert!(same(a.median_before, b.median_before), "{id}");
+    assert_eq!(a.num_samples, b.num_samples, "{id}");
+    assert_eq!(a.start_sample, b.start_sample, "{id}");
+    assert_eq!(a.tracked_scaling, b.tracked_scaling, "{id}");
+    assert_eq!(a.predicted_scaling, b.predicted_scaling, "{id}");
+    assert_eq!(a.num_minknow_events, b.num_minknow_events, "{id}");
+    assert_eq!(
+        a.num_reads_since_mux_change, b.num_reads_since_mux_change,
+        "{id}"
+    );
+    assert!(
+        same(a.time_since_mux_change, b.time_since_mux_change),
+        "{id}"
+    );
+    assert!(same(a.open_pore_level, b.open_pore_level), "{id}");
+    assert!(
+        same(a.expected_open_pore_level, b.expected_open_pore_level),
+        "{id}"
+    );
+    assert!(same(a.selected_read_level, b.selected_read_level), "{id}");
+    let (ra, rb) = (&a.run_info, &b.run_info);
+    assert_eq!(ra.acquisition_id, rb.acquisition_id);
+    assert_eq!(ra.acquisition_start_time_ms, rb.acquisition_start_time_ms);
+    assert_eq!((ra.adc_min, ra.adc_max), (rb.adc_min, rb.adc_max));
+    assert_eq!(ra.context_tags, rb.context_tags);
+    assert_eq!(ra.experiment_name, rb.experiment_name);
+    assert_eq!(ra.flow_cell_id, rb.flow_cell_id);
+    assert_eq!(ra.flow_cell_product_code, rb.flow_cell_product_code);
+    assert_eq!(ra.protocol_name, rb.protocol_name);
+    assert_eq!(ra.protocol_run_id, rb.protocol_run_id);
+    assert_eq!(ra.protocol_start_time_ms, rb.protocol_start_time_ms);
+    assert_eq!(ra.sample_id, rb.sample_id);
+    assert_eq!(ra.sample_rate, rb.sample_rate);
+    assert_eq!(ra.sequencing_kit, rb.sequencing_kit);
+    assert_eq!(ra.sequencer_position, rb.sequencer_position);
+    assert_eq!(ra.sequencer_position_type, rb.sequencer_position_type);
+    assert_eq!(ra.software, rb.software);
+    assert_eq!(ra.system_name, rb.system_name);
+    assert_eq!(ra.system_type, rb.system_type);
+    assert_eq!(ra.tracking_id, rb.tracking_id);
+    assert_eq!(a.signal().unwrap(), b.signal().unwrap(), "{id}");
+}
+
+#[test]
+fn rewrite_all_fields_fixture_with_both_writers() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/all_fields_v7.pod5");
+    let src = Reader::open(&path).unwrap();
+
+    let mut buffered = Writer::new();
+    for r in src.reads_iter() {
+        buffered.add_read(r.clone(), r.signal().unwrap());
+    }
+    let mut buf = Vec::new();
+    buffered.write_to(&mut buf).unwrap();
+
+    let tmp = std::env::temp_dir().join(format!("pod5lib-allfields-{}.pod5", std::process::id()));
+    let mut streaming = pod5lib::StreamingWriter::create(&tmp).unwrap();
+    streaming.signal_batch_size = 1;
+    for r in src.reads_iter() {
+        streaming.write_read(r, &r.signal().unwrap()).unwrap();
+    }
+    streaming.finish().unwrap();
+
+    let outputs = [
+        Reader::from_reader(&mut Cursor::new(buf)).unwrap(),
+        Reader::open(&tmp).unwrap(),
+    ];
+    for dst in &outputs {
+        assert_eq!(dst.len(), src.len());
+        assert_eq!(dst.run_infos().len(), 2);
+        for a in src.reads_iter() {
+            assert_same_read(a, dst.get_read_by_id(&a.read_id_str()).unwrap());
+        }
+    }
+    drop(outputs);
+    let _ = std::fs::remove_file(&tmp);
+}

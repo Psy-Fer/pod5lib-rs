@@ -111,11 +111,16 @@ jobs:
         include:
           # Latest validated release (POD5_COMPAT_VERSION): reads every fixture.
           - pod5: "0.3.49"
-            fixtures: "3 4 5 6 7"
+            fixtures: >-
+              multi_fast5_zip_v3 multi_fast5_zip_v4 multi_fast5_zip_v5
+              multi_fast5_zip_v6 multi_fast5_zip_v7 all_fields_v7
           # Pre-V5 reader: checks that our V7 output stays readable by older pod5.
-          # It cannot read V6 (32-bit channel), which is why upstream introduced V7.
+          # It cannot read V6 (32-bit channel), which is why upstream introduced V7,
+          # and it predates the fields all_fields_v7 exercises (channel_32bit, V5).
           - pod5: "0.3.39"
-            fixtures: "3 4 5 7"
+            fixtures: >-
+              multi_fast5_zip_v3 multi_fast5_zip_v4 multi_fast5_zip_v5
+              multi_fast5_zip_v7
 
     steps:
       - uses: actions/checkout@v4
@@ -142,17 +147,17 @@ jobs:
 
       - name: Read parity (Rust reader vs Python reader)
         run: |
-          for v in ${{ matrix.fixtures }}; do
-            echo "::group::v$v"
-            python tests/test_parity.py "tests/fixtures/multi_fast5_zip_v$v.pod5"
+          for f in ${{ matrix.fixtures }}; do
+            echo "::group::$f"
+            python tests/test_parity.py "tests/fixtures/$f.pod5"
             echo "::endgroup::"
           done
 
       - name: Write parity (Rust writer, read back by Python)
         run: |
-          for v in ${{ matrix.fixtures }}; do
-            echo "::group::v$v"
-            python tests/test_write_parity.py "tests/fixtures/multi_fast5_zip_v$v.pod5"
+          for f in ${{ matrix.fixtures }}; do
+            echo "::group::$f"
+            python tests/test_write_parity.py "tests/fixtures/$f.pod5"
             echo "::endgroup::"
           done
 

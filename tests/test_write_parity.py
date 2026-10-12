@@ -68,6 +68,62 @@ def approx_eq(a: float, b: float, rel=1e-5, abs_tol=1e-7) -> bool:
     return abs(a - b) <= max(rel * max(abs(a), abs(b)), abs_tol)
 
 
+def collect_reads(pod5, path: pathlib.Path, limit: int | None = None) -> dict:
+    """Every read field Python pod5 exposes, plus the full run info, keyed by read ID."""
+    reads = {}
+    with pod5.Reader(str(path)) as reader:
+        for i, rec in enumerate(reader.reads()):
+            if limit is not None and i >= limit:
+                break
+            sig = rec.signal
+            ri = rec.run_info
+            fields = {
+                "read_number": rec.read_number,
+                "start_sample": rec.start_sample,
+                "num_samples": rec.num_samples,
+                "channel": rec.pore.channel,
+                "well": rec.pore.well,
+                "pore_type": rec.pore.pore_type,
+                "calib_offset": float(rec.calibration.offset),
+                "calib_scale": float(rec.calibration.scale),
+                "median_before": float(rec.median_before),
+                "end_reason": rec.end_reason.reason.name.lower(),
+                "end_reason_forced": bool(rec.end_reason.forced),
+                "num_minknow_events": rec.num_minknow_events,
+                "tracked_shift": float(rec.tracked_scaling.shift),
+                "tracked_scale": float(rec.tracked_scaling.scale),
+                "predicted_shift": float(rec.predicted_scaling.shift),
+                "predicted_scale": float(rec.predicted_scaling.scale),
+                "num_reads_since_mux_change": rec.num_reads_since_mux_change,
+                "time_since_mux_change": float(rec.time_since_mux_change),
+                "signal_len": int(len(sig)),
+                "signal_sum": int(sig.astype("int64").sum()),
+                "signal_first16": sig[:16].tolist(),
+                "signal_last16": sig[max(0, len(sig) - 16):].tolist(),
+                "signal_full": sig.tolist() if i < FULL_SIGNAL_READS else None,
+            }
+            # Added in later pod5 releases (V4: open_pore_level, V5: the other two).
+            for name in ("open_pore_level", "expected_open_pore_level", "selected_read_level"):
+                if hasattr(rec, name):
+                    fields[name] = float(getattr(rec, name))
+            for name, value in vars(ri).items():
+                if isinstance(value, float):
+                    value = float(value)
+                elif hasattr(value, "items"):
+                    value = dict(value)
+                fields[f"run_info.{name}"] = value
+            reads[str(rec.read_id)] = fields
+    return reads
+
+
+def first_difference(a: list, b: list) -> str:
+    """Describe where two sample lists first differ, including a length difference."""
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return f"sample {i}: src={x} written={y}"
+    return f"lengths differ: src={len(a)} written={len(b)}"
+
+
 def run_parity(src: pathlib.Path) -> None:
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -81,55 +137,8 @@ def run_parity(src: pathlib.Path) -> None:
     run_rust_writer(src, OUT_FILE, n)
     print(f"Output:   {OUT_FILE}")
 
-    # Collect source reads with Python pod5
-    src_reads = {}
-    with pod5.Reader(str(src)) as reader:
-        for i, rec in enumerate(reader.reads()):
-            if i >= n:
-                break
-            sig = rec.signal
-            src_reads[str(rec.read_id)] = {
-                "read_number": rec.read_number,
-                "num_samples": rec.num_samples,
-                "channel": rec.pore.channel,
-                "well": rec.pore.well,
-                "pore_type": rec.pore.pore_type,
-                "calib_offset": rec.calibration.offset,
-                "calib_scale": rec.calibration.scale,
-                "median_before": rec.median_before,
-                "end_reason": rec.end_reason.reason.name.lower(),
-                "end_reason_forced": bool(rec.end_reason.forced),
-                "run_info_acq_id": rec.run_info.acquisition_id,
-                "signal_len": int(len(sig)),
-                "signal_sum": int(sig.astype("int64").sum()),
-                "signal_first16": sig[:16].tolist(),
-                "signal_last16": sig[max(0, len(sig) - 16):].tolist(),
-                "signal_full": sig.tolist() if i < FULL_SIGNAL_READS else None,
-            }
-
-    # Collect written reads with Python pod5
-    written_reads = {}
-    with pod5.Reader(str(OUT_FILE)) as reader:
-        for i, rec in enumerate(reader.reads()):
-            sig = rec.signal
-            written_reads[str(rec.read_id)] = {
-                "read_number": rec.read_number,
-                "num_samples": rec.num_samples,
-                "channel": rec.pore.channel,
-                "well": rec.pore.well,
-                "pore_type": rec.pore.pore_type,
-                "calib_offset": rec.calibration.offset,
-                "calib_scale": rec.calibration.scale,
-                "median_before": rec.median_before,
-                "end_reason": rec.end_reason.reason.name.lower(),
-                "end_reason_forced": bool(rec.end_reason.forced),
-                "run_info_acq_id": rec.run_info.acquisition_id,
-                "signal_len": int(len(sig)),
-                "signal_sum": int(sig.astype("int64").sum()),
-                "signal_first16": sig[:16].tolist(),
-                "signal_last16": sig[max(0, len(sig) - 16):].tolist(),
-                "signal_full": sig.tolist() if i < FULL_SIGNAL_READS else None,
-            }
+    src_reads = collect_reads(pod5, src, limit=n)
+    written_reads = collect_reads(pod5, OUT_FILE)
 
     assert len(written_reads) == n, (
         f"Expected {n} reads in output, got {len(written_reads)}"
@@ -141,26 +150,16 @@ def run_parity(src: pathlib.Path) -> None:
     fails = []
     for rid, s in src_reads.items():
         w = written_reads[rid]
-        for field in ("read_number", "num_samples", "channel", "well",
-                      "pore_type", "end_reason", "end_reason_forced",
-                      "run_info_acq_id", "signal_len", "signal_sum",
-                      "signal_first16", "signal_last16"):
-            if s[field] != w[field]:
-                fails.append(f"  {rid[:8]}... {field}: src={s[field]!r} written={w[field]!r}")
-        for field in ("calib_offset", "calib_scale", "median_before"):
-            if not approx_eq(s[field], w[field]):
-                fails.append(
-                    f"  {rid[:8]}... {field}: src={s[field]:.6g} written={w[field]:.6g}"
-                )
-        if s["signal_full"] is not None:
-            if s["signal_full"] != w["signal_full"]:
-                first_bad = next(
-                    i for i, (a, b) in enumerate(zip(s["signal_full"], w["signal_full"])) if a != b
-                )
-                fails.append(
-                    f"  {rid[:8]}... signal_full mismatch at sample {first_bad}: "
-                    f"src={s['signal_full'][first_bad]} written={w['signal_full'][first_bad]}"
-                )
+        for field, sv in s.items():
+            wv = w[field]
+            if field == "signal_full":
+                if sv is not None and sv != wv:
+                    fails.append(f"  {rid[:8]}... {field}: {first_difference(sv, wv)}")
+            elif isinstance(sv, float):
+                if not approx_eq(sv, wv):
+                    fails.append(f"  {rid[:8]}... {field}: src={sv:.6g} written={wv:.6g}")
+            elif sv != wv:
+                fails.append(f"  {rid[:8]}... {field}: src={sv!r} written={wv!r}")
 
     if fails:
         print(f"\nPARITY FAILURES ({len(fails)}):")
@@ -169,11 +168,7 @@ def run_parity(src: pathlib.Path) -> None:
         raise AssertionError(f"{len(fails)} parity failures (see above)")
 
     print(f"\nAll {n} reads match between source and Rust-written file.")
-    print("Fields checked: read_id, read_number, num_samples, channel, well, pore_type,")
-    print("                calib_offset, calib_scale, median_before, end_reason,")
-    print(f"                end_reason_forced, run_info.acquisition_id, signal_len,")
-    print(f"                signal_sum, signal_first16, signal_last16,")
-    print(f"                signal_full (first {FULL_SIGNAL_READS} reads)")
+    print(f"Fields checked: {', '.join(next(iter(src_reads.values())))}")
 
 
 def _count_reads_python(src: pathlib.Path) -> int:
