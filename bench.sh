@@ -68,6 +68,9 @@ if mode == "sequential":
 
 elif mode == "write":
     out = os.path.join(tempfile.gettempdir(), "pod5_bench_py_out.pod5")
+    # pod5.Writer refuses to overwrite an existing file
+    if os.path.exists(out):
+        os.remove(out)
     cap = first_n
     t0 = time.perf_counter()
     with pod5.Reader(path) as reader:
@@ -77,6 +80,7 @@ elif mode == "write":
     ms = (time.perf_counter() - t0) * 1000
     n = cap if cap is not None else 0
     bytes_written = os.path.getsize(out)
+    os.remove(out)
     print(f"{ms:.0f} {rss_mb()} {n} {bytes_written}")
 PYEOF
 
