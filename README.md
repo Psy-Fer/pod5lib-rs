@@ -80,13 +80,15 @@ writer.finish()?;   // required: a writer dropped without finish() leaves an inv
 
 ## Performance
 
-Measured with pod5lib **0.1.0** on a 500,000-read, 24.7 GB POD5 file on a 64-core server, against the Python `pod5` library.
+Measured with pod5lib **0.2.0** on a 500,000-read, 24.7 GB POD5 file on a 64-core server, against the Python `pod5` library.
 
 | Operation | Rust | Python | Speed |
 |---|---|---|---|
-| Read (sequential) | 54.6 s, 300 MB RSS | 58.0 s, 23,769 MB RSS | parity |
-| Read (parallel, 16 threads) | **31.1 s**, 359 MB RSS | 58.0 s, 23,769 MB RSS | **1.9× faster** |
-| Write (50k reads) | **12.7 s**, 525 MB RSS | 21.7 s, 2,531 MB RSS | **1.7× faster** |
+| Read (sequential) | 49.2 s, 315 MB RSS | 51.4 s, 23,713 MB RSS | parity |
+| Read (parallel, 16 threads) | **26.5 s**, 370 MB RSS | 51.4 s, 23,713 MB RSS | **1.9× faster** |
+| Write (50k reads) | **10.3 s**, 397 MB RSS | 20.3 s, 2,540 MB RSS | **2.0× faster** |
+
+Timings are from a second run, with the file in the page cache.
 
 Python's read RSS is not decompressed signal piling up: Python `pod5` memory-maps the file, and RSS counts the mapped file pages it has touched, which the kernel can reclaim. Iterating every signal in a 733 MB file with Python `pod5` 0.3.49 ends with 787 MB RSS, of which 746 MB is the mapped file and 41 MB is the process's own memory. pod5lib reads signal with ordinary file reads, so the same pages sit in the page cache but not in its RSS. The RSS figures are therefore not a like-for-like memory comparison.
 
