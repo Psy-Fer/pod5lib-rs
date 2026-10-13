@@ -55,14 +55,14 @@ for read in reader.reads_iter() {
 
 ## Performance
 
-Measured with pod5lib 0.1.0 on a 500,000-read, 24.7 GB POD5 file on a 64-core server,
-against the Python `pod5` library.
+Measured with pod5lib 0.2.0 on a 500,000-read, 24.7 GB POD5 file on a 64-core server,
+against the Python `pod5` library, with the file in the page cache.
 
 | Operation | Rust | Python | Speed |
 |---|---|---|---|
-| Read (sequential) | 54.6 s, 300 MB RSS | 58.0 s, 23,769 MB RSS | parity |
-| Read (parallel, 16 threads) | **31.1 s**, 359 MB RSS | 58.0 s, 23,769 MB RSS | **1.9× faster** |
-| Write (50k reads) | **12.7 s**, 525 MB RSS | 21.7 s, 2,531 MB RSS | **1.7× faster** |
+| Read (sequential) | 49.2 s, 315 MB RSS | 51.4 s, 23,713 MB RSS | parity |
+| Read (parallel, 16 threads) | **26.5 s**, 370 MB RSS | 51.4 s, 23,713 MB RSS | **1.9× faster** |
+| Write (50k reads) | **10.3 s**, 397 MB RSS | 20.3 s, 2,540 MB RSS | **2.0× faster** |
 
 Python's read RSS is mostly the memory-mapped file, not decompressed signal: Python
 `pod5` maps the file and RSS counts the mapped pages it has touched, which the kernel

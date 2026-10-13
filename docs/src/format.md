@@ -21,12 +21,13 @@ tables and a [FlatBuffers](https://flatbuffers.dev/) footer.
 [  8 bytes ] closing signature (identical to opening)
 ```
 
-The reader navigates from the **end of file**: reads `footer_length` at
-`file_size − 32`, takes the FlatBuffer as the `footer_length` bytes before that,
-verifies the magic before it, then parses the FlatBuffer to find the byte offsets of
-the three Arrow sections. Upstream relies on `footer_length` being a multiple of 8,
-which a standard FlatBuffers builder guarantees; pod5lib 0.1 wrote unpadded lengths,
-which is why current `pod5` cannot open its files. Every offset and length read from
+Readers navigate from the **end of file**: read `footer_length` at `file_size − 32`,
+take the FlatBuffer as the `footer_length` bytes before that, verify the magic before
+it, then parse the FlatBuffer to find the byte offsets of the three Arrow sections.
+Upstream relies on `footer_length` being a multiple of 8, which a standard FlatBuffers
+builder guarantees; pod5lib 0.1 wrote unpadded lengths, which is why current `pod5`
+cannot open its files. pod5lib rounds `footer_length` up to a multiple of 8 before
+stepping back, so it reads both. Every offset and length read from
 the file is checked against the file size before use.
 
 ## Three Arrow IPC tables
@@ -43,7 +44,7 @@ The FlatBuffers `Footer.contents` vector lists the byte offset and length of eac
 | `channel` | `UInt16` (`UInt32` in V6) | Channel number; 0 in V7 when it does not fit in 16 bits |
 | `well` | `UInt8` | Well number |
 | `start` | `UInt64` | Samples recorded on the channel before the read started (`ReadRecord::start_sample`) |
-| `median_before` | `Float32` | Open-channel level before the read (pA); nullable |
+| `median_before` | `Float32` | Open-channel level before the read (pA); NaN if null |
 | `num_samples` | `UInt64` | Total ADC samples |
 | `calibration_offset` | `Float32` | ADC zero-point offset |
 | `calibration_scale` | `Float32` | Picoamps per ADC count |
@@ -56,7 +57,7 @@ The FlatBuffers `Footer.contents` vector lists the byte offset and length of eac
 | `predicted_scaling_shift/scale` | `Float32` | Predicted scaling; NaN if absent |
 | `num_reads_since_mux_change` | `UInt32` | (deprecated; optional) |
 | `time_since_mux_change` | `Float32` | (deprecated; optional) |
-| `open_pore_level` | `Float32` | Open-pore level (pA); nullable |
+| `open_pore_level` | `Float32` | Open-pore level (pA); V4+, NaN if absent or null |
 | `expected_open_pore_level` | `Float32` | Expected open-pore level (pA); V5+, NaN if absent |
 | `selected_read_level` | `Float32` | Selected read level (pA); V5+, NaN if absent |
 | `channel_32bit` | `UInt32` | Full channel number; V7+, preferred over `channel` when present |

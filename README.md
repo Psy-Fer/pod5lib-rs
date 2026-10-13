@@ -22,7 +22,7 @@ Upgrading from 0.1? See the [changelog](CHANGELOG.md#upgrading-from-01). Files w
 - Build reads from scratch with `ReadRecord::new` (e.g. converting from FAST5/BLOW5)
 - Reads every POD5 written since pod5 0.0.38 (Reads table V3–V7); writes V7
 - Corrupt or truncated files return errors rather than panicking or exhausting memory
-- No `unsafe` code in this crate; SVB16 decoding uses the SIMD [`svb`](https://crates.io/crates/svb) crate, and zstd uses the `zstd` crate (which builds the C zstd library)
+- No `unsafe` code in this crate; SVB16 encoding and decoding use the SIMD [`svb`](https://crates.io/crates/svb) crate, and zstd uses the `zstd` crate (which builds the C zstd library)
 
 ## Quick start
 

@@ -2,7 +2,7 @@
 
 All notable changes to pod5lib will be documented here.
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-10-13
 
 Brings pod5lib in line with Python `pod5` **0.3.49** (Reads table V7), fixes files that
 current `pod5` could not open, and hardens reading against corrupt files. Contains
