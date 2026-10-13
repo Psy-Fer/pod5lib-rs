@@ -1,10 +1,11 @@
-/// Write the first N reads from a source POD5 file to a new POD5 file.
-///
-/// Usage:  cargo run --example write_pod5 [src.pod5 [out.pod5 [N]]]
-///
-/// Defaults: src = tests/data/sample.pod5 or examples/small.pod5
-///           out = tests/data/rust_written.pod5
-///           N   = 10
+//! Write the first N reads from a source POD5 file to a new POD5 file.
+//!
+//! Usage:  cargo run --example write_pod5 [src.pod5 [out.pod5 [N]]]
+//!
+//! Defaults: src = tests/data/sample.pod5 or examples/small.pod5
+//!           out = tests/data/rust_written.pod5
+//!           N   = 10
+
 use std::path::PathBuf;
 
 use pod5lib::{Reader, Writer};

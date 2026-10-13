@@ -321,7 +321,9 @@ impl Reader {
         self.reads.is_empty()
     }
 
-    /// POD5 specification version stored in the file footer (e.g. `"1.0.0"`).
+    /// `pod5_version` stored in the file footer: the version of the library that wrote
+    /// the file (e.g. `"0.3.49"`), not a format version. See also
+    /// [`reads_table_version`](Self::reads_table_version).
     pub fn pod5_version(&self) -> &str {
         &self.pod5_version
     }
@@ -362,6 +364,17 @@ pub struct ParReadsIter<'a> {
     batch_start: usize,
     batch_signals: Vec<Vec<i16>>,
     batch_pos: usize,
+}
+
+impl std::fmt::Debug for ParReadsIter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParReadsIter")
+            .field("reads", &self.reads.len())
+            .field("threads", &self.pool.current_num_threads())
+            .field("batch_size", &self.batch_size)
+            .field("next_fetch", &self.next_fetch)
+            .finish()
+    }
 }
 
 impl<'a> Iterator for ParReadsIter<'a> {

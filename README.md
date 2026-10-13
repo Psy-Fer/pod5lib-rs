@@ -6,15 +6,23 @@
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
-Pure Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/) nanopore sequencing files, the successor to FAST5 from Oxford Nanopore Technologies.
+Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/) nanopore sequencing files, the successor to FAST5 from Oxford Nanopore Technologies. Files are interchangeable with ONT's own `pod5` library.
+
+```toml
+[dependencies]
+pod5lib = "0.2"
+```
+
+Upgrading from 0.1? See the [changelog](CHANGELOG.md#upgrading-from-01). Files written by 0.1 cannot be opened by current versions of Python `pod5`; read and rewrite them with 0.2.
 
 ## Features
 
-- Read POD5 files: iterate reads, random-access by UUID, decompress VBZ signal
-- Write POD5 files compatible with the Python `pod5` library
-- Streaming writer (`StreamingWriter`) for memory-efficient writing of large files
+- Read POD5 files: iterate reads, random access by read ID, parallel signal decompression
+- Write POD5 files compatible with the Python `pod5` library, buffered (`Writer`) or streaming (`StreamingWriter`)
 - Build reads from scratch with `ReadRecord::new` (e.g. converting from FAST5/BLOW5)
-- No unsafe code; pure Rust VBZ decompression (delta + zigzag + SVB16 + zstd)
+- Reads every POD5 written since pod5 0.0.38 (Reads table V3–V7); writes V7
+- Corrupt or truncated files return errors rather than panicking or exhausting memory
+- No `unsafe` code in this crate; SVB16 decoding uses the SIMD [`svb`](https://crates.io/crates/svb) crate, and zstd uses the `zstd` crate (which builds the C zstd library)
 
 ## Quick start
 
@@ -63,30 +71,33 @@ let mut writer = StreamingWriter::create("output.pod5")?;
 
 for read in src.reads_iter() {
     let signal = read.signal()?;
-    writer.write_read(read, &signal)?;   // signal compressed immediately, not held
+    writer.write_read(read, &signal)?;
 }
-writer.finish()?;
+writer.finish()?;   // required: a writer dropped without finish() leaves an invalid file
 ```
 
-`StreamingWriter` VBZ-compresses each read's signal on `write_read` and releases it immediately, rather than accumulating raw samples for the whole file. Prefer it for large files.
+`StreamingWriter` buffers `signal_batch_size` reads (default 64), compresses them in parallel, and hands them to a background thread that writes them out, so memory use stays roughly constant however large the file. `Writer` keeps every read in memory until `write_file`. Prefer `StreamingWriter` for large files.
 
 ## Performance
 
-Benchmarked on a 500,000-read / 24.7 GB POD5 file, 64-core server, compared against the Python `pod5` library.
+Measured with pod5lib **0.1.0** on a 500,000-read, 24.7 GB POD5 file on a 64-core server, against the Python `pod5` library.
 
-| Operation | Rust | Python | Ratio |
+| Operation | Rust | Python | Speed |
 |---|---|---|---|
-| Read (sequential) | 54.6 s, **300 MB** RSS | 58.0 s, 23,769 MB RSS | speed parity, **79× less RAM** |
-| Read (parallel, 16 threads) | **31.1 s**, **359 MB** RSS | 58.0 s, 23,769 MB RSS | **1.9× faster**, **66× less RAM** |
-| Write (50k reads) | **12.7 s**, **525 MB** RSS | 21.7 s, 2,531 MB RSS | **1.7× faster**, **5× less RAM** |
+| Read (sequential) | 54.6 s, 300 MB RSS | 58.0 s, 23,769 MB RSS | parity |
+| Read (parallel, 16 threads) | **31.1 s**, 359 MB RSS | 58.0 s, 23,769 MB RSS | **1.9× faster** |
+| Write (50k reads) | **12.7 s**, 525 MB RSS | 21.7 s, 2,531 MB RSS | **1.7× faster** |
 
-Python's RSS for the sequential read case (~24 GB) matches the uncompressed file size. The library accumulates decompressed signal arrays in memory throughout iteration. Rust decompresses each read's signal on demand and discards it immediately, keeping RSS constant at ~300 MB regardless of file size.
+Python's read RSS is not decompressed signal piling up: Python `pod5` memory-maps the file, and RSS counts the mapped file pages it has touched, which the kernel can reclaim. Iterating every signal in a 733 MB file with Python `pod5` 0.3.49 ends with 787 MB RSS, of which 746 MB is the mapped file and 41 MB is the process's own memory. pod5lib reads signal with ordinary file reads, so the same pages sit in the page cache but not in its RSS. The RSS figures are therefore not a like-for-like memory comparison.
 
-`Reader::par_reads_iter(threads)` decompresses signal in parallel: blobs are gathered under a single I/O lock acquisition per batch, then decompressed concurrently with a rayon thread pool of the specified size. `StreamingWriter` similarly compresses signal in parallel rayon batches before streaming to a background writer thread.
+`Reader::par_reads_iter(threads)` decompresses signal in parallel: blobs are gathered under a single I/O lock acquisition per batch, then decompressed concurrently on a rayon thread pool of the given size.
 
 ## Compatibility
 
-Tested against Python `pod5` **0.3.39** and **0.3.49**. Files produced by either library are fully readable by the other. POD5 files with `pod5_version` strings in the `0.3.x` series are fully supported.
+Validated against Python `pod5` **0.3.49** (`pod5lib::POD5_COMPAT_VERSION`) and **0.3.39**; CI checks both, field by field, in each direction.
+
+- **Reading:** any POD5 file written by `pod5` 0.0.38 or later (Reads table V3–V7). Older files fail with `Error::LegacyPod5Version`; convert them with upstream `pod5 update`.
+- **Writing:** pod5lib writes Reads table V7, as `pod5` 0.3.48+ does. Older `pod5` versions can still read these files, but releases before 0.3.48 see channels above 65535 as 0, and releases before 0.3.44 do not see `expected_open_pore_level` / `selected_read_level`.
 
 The POD5 format is specified and maintained by Oxford Nanopore Technologies at [github.com/nanoporetech/pod5-file-format](https://github.com/nanoporetech/pod5-file-format).
 
@@ -141,7 +152,7 @@ cargo ci-clippy            # clippy -D warnings (CI)
 cargo ci-test              # all tests including doc-tests (CI)
 ```
 
-Integration tests against a real POD5 file:
+Tests run against the upstream fixtures in `tests/fixtures/`. To also run the integration tests against your own file:
 
 ```bash
 mkdir -p tests/data
@@ -149,4 +160,4 @@ cp your_file.pod5 tests/data/sample.pod5
 cargo ci-test
 ```
 
-Tests that require `tests/data/sample.pod5` are silently skipped when the file is absent.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the Python interop checks.

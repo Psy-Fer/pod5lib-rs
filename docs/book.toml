@@ -1,7 +1,7 @@
 [book]
-title = "pod5"
+title = "pod5lib"
 authors = ["Psy-Fer"]
-description = "Pure Rust library for reading and writing POD5 nanopore sequencing files"
+description = "Rust library for reading and writing POD5 nanopore sequencing files"
 src = "src"
 language = "en"
 

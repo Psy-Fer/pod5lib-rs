@@ -1,15 +1,16 @@
-/// Write a POD5 file from reads built in code (no source POD5 file), as a
-/// converter from another format would. Also used by tests/test_scratch_parity.py.
-///
-/// Usage:  cargo run --example write_from_scratch [out.pod5]
-///
-/// Default: out = tests/data/rust_scratch.pod5
-///
-/// Read i (0-based) gets channel 100 + i (read 3 uses 70000, which only fits in
-/// `channel_32bit`), read_number 1000 + i, end reason END_REASONS[i] with its
-/// default `forced` flag, and signal `(j * 7 + i) % 1024 - 512` for j in
-/// 0..SIGNAL_LENS[i]. Read 4 spans three 102,400-sample signal rows; read 5 has
-/// an empty signal.
+//! Write a POD5 file from reads built in code (no source POD5 file), as a
+//! converter from another format would. Also used by tests/test_scratch_parity.py.
+//!
+//! Usage:  cargo run --example write_from_scratch [out.pod5]
+//!
+//! Default: out = tests/data/rust_scratch.pod5
+//!
+//! Read i (0-based) gets channel 100 + i (read 3 uses 70000, which only fits in
+//! `channel_32bit`), read_number 1000 + i, end reason END_REASONS[i] with its
+//! default `forced` flag, and signal `(j * 7 + i) % 1024 - 512` for j in
+//! 0..SIGNAL_LENS[i]. Read 4 spans three 102,400-sample signal rows; read 5 has
+//! an empty signal.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

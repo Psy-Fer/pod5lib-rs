@@ -1,5 +1,11 @@
-//! Pure Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/)
+//! Rust library for reading and writing [POD5](https://pod5-file-format.readthedocs.io/en/latest/)
 //! nanopore sequencing files, the successor to FAST5 from Oxford Nanopore Technologies.
+//! Files are interchangeable with ONT's own `pod5` library (validated against
+//! [`POD5_COMPAT_VERSION`]): any file written by `pod5` 0.0.38 or later can be read,
+//! and files are written as `pod5` 0.3.48+ writes them.
+//!
+//! Files are treated as untrusted input: a corrupt or truncated file returns an
+//! [`Error`], never a panic or an allocation sized by corrupt data.
 //!
 //! POD5 files embed three [Apache Arrow IPC](https://arrow.apache.org/docs/format/IPC.html)
 //! tables (Reads, Signal, RunInfo) in a binary container with a
@@ -29,8 +35,13 @@
 //! ## Writing
 //!
 //! Use [`Writer`] for small files or when all reads are already in memory.
-//! Use [`StreamingWriter`] for large files; it VBZ-compresses each read's signal
-//! immediately and does not hold decompressed samples beyond each [`StreamingWriter::write_read`] call.
+//! Use [`StreamingWriter`] for large files: it buffers only `signal_batch_size` reads
+//! at a time, compresses them in parallel and writes them from a background thread,
+//! so memory use stays roughly constant. [`StreamingWriter::finish`] must be called
+//! to complete the file.
+//!
+//! To write data that did not come from a POD5 file, build reads with
+//! [`ReadRecord::new`].
 //!
 //! ```no_run
 //! use pod5lib::{Reader, StreamingWriter};
@@ -45,6 +56,7 @@
 //! writer.finish().unwrap();
 //! ```
 #![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 mod error;
 mod footer;

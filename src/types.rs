@@ -68,7 +68,7 @@ pub struct Pore {
 pub struct Calibration {
     /// ADC zero-point offset added before scaling; typically negative.
     pub offset: f32,
-    /// Volts-per-ADC-count scale factor (`adc_range / digitisation`).
+    /// Picoamps per ADC count (`adc_range / digitisation`, with the range in pA).
     pub scale: f32,
 }
 
@@ -272,7 +272,8 @@ impl PartialEq for ShiftScalePair {
 /// `adc_min`/`adc_max` and `sample_rate`; Python `pod5` requires every field.
 #[derive(Debug, Clone, Default)]
 pub struct RunInfo {
-    /// Unique identifier for the MinKNOW acquisition (hex UUID string).
+    /// Unique identifier for the MinKNOW acquisition (typically a 40-character hex
+    /// hash); the Reads table's `run_info` column refers to it.
     pub acquisition_id: String,
     /// Milliseconds since UNIX epoch (UTC) when the acquisition started.
     pub acquisition_start_time_ms: i64,
@@ -325,12 +326,14 @@ impl RunInfo {
 
 /// All metadata and signal for one nanopore read.
 ///
-/// Matches the Python `pod5.ReadRecord` public API field for field.
+/// Holds the same metadata as Python `pod5.ReadRecord`. Signal is decompressed on
+/// demand by [`signal`](Self::signal) / [`signal_pa`](Self::signal_pa). Build one
+/// from scratch with [`ReadRecord::new`].
 #[derive(Debug, Clone)]
 pub struct ReadRecord {
     /// 16-byte UUID in standard RFC 4122 big-endian byte order. Use [`uuid_to_str`] to display.
     pub read_id: [u8; 16],
-    /// Sequential read counter within the acquisition (1-indexed).
+    /// Read number on its channel: increasing, but not necessarily consecutive.
     pub read_number: u32,
     /// Physical pore location where this read was acquired.
     pub pore: Pore,

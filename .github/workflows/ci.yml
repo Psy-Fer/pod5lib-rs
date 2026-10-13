@@ -52,6 +52,17 @@ jobs:
       - name: Tests
         run: cargo ci-test
 
+      # The mdBook (docs/) is not part of the crate, so check its Rust examples
+      # compile and run against the current API.
+      - name: Book examples
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          cargo build
+          for f in docs/src/*.md; do
+            rustdoc --test --edition 2024 -L target/debug/deps \
+              --extern pod5lib=target/debug/libpod5lib.rlib "$f"
+          done
+
   # Build and test on the minimum supported Rust version (rust-version in Cargo.toml).
   msrv:
     name: MSRV (Rust 1.87)

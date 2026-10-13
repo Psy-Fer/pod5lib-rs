@@ -26,10 +26,15 @@ pip install pod5==0.3.49
 python tests/test_parity.py tests/fixtures/multi_fast5_zip_v7.pod5        # Rust vs Python reader
 python tests/test_write_parity.py tests/fixtures/multi_fast5_zip_v7.pod5  # Rust writer -> Python reader
 python tests/test_scratch_parity.py                                      # ReadRecord::new -> Python reader
+
+# Every single-byte corruption of a small file (CI runs this in release mode)
+cargo test --release --test malformed -- --include-ignored
 ```
 
-`tests/fixtures/` holds ONT's upstream test files, one per Reads-table version (V2–V7);
-see its README for provenance.
+`tests/fixtures/` holds ONT's upstream test files (one per Reads-table version, V2–V7)
+and files written by upstream pod5 0.3.49 that exercise every field; see its README for
+provenance. Changes to reading must keep `tests/malformed.rs` passing: corrupt input has
+to produce an error, never a panic or an allocation sized by corrupt data.
 
 ## What to work on
 
